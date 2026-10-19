@@ -77,8 +77,29 @@ async function apiRequest(path, options = {}) {
     ...options,
     headers: { 'Content-Type': 'application/json', ...options.headers }
   });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+
+  const contentType = response.headers.get('content-type') || '';
+  const rawText = await response.text();
+  let result;
+
+  if (rawText) {
+    const trimmed = rawText.trim();
+    if (trimmed.startsWith('<')) {
+      throw new Error('Oracle API is unavailable or returned an HTML page instead of JSON. Start the API server and retry.');
+    }
+
+    try {
+      result = JSON.parse(trimmed);
+    } catch (error) {
+      const fallback = contentType.includes('application/json') ? 'The Oracle response was not valid JSON.' : 'The Oracle API returned an unexpected response.';
+      throw new Error(fallback);
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(result?.error || `Request failed (${response.status})`);
+  }
+
   return result;
 }
 
