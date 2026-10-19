@@ -5,6 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import oracledb from 'oracledb';
 
+oracledb.initOracleClient({
+  libDir: 'C:\\Oracle\\instantclient_23_8'
+});
+
 const root = path.dirname(fileURLToPath(import.meta.url));
 const distDirectory = path.join(root, 'dist');
 const port = Number(process.env.PORT || 3001);
