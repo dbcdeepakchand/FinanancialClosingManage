@@ -11,37 +11,12 @@ const port = Number(process.env.PORT || 3001);
 const host = process.env.HOST || '127.0.0.1';
 const maxRequestBytes = 1024 * 1024;
 const statuses = new Set(['Not started', 'In progress', 'Blocked', 'Complete']);
-const priorities = new Set(['Low', 'Medium', 'High']);
-const frequencies = new Set(['Both', 'Monthly', 'Quarterly']);
-const editableColumns = {
-  entity: 'ENTITY_ID',
-  status: 'STATUS',
-  owner: 'OWNER_NAME',
-  due: 'DUE_DAY',
-  note: 'NOTE'
-};
-
-const mergeSql = `
-  MERGE INTO FIN_CLOSE_TASKS target
-  USING (SELECT :id AS ID FROM DUAL) source
-  ON (target.ID = source.ID)
-  WHEN NOT MATCHED THEN INSERT
-    (ID, TITLE, MODULE_NAME, FREQUENCY, OWNER_NAME, DUE_DAY, PRIORITY, STATUS, ENTITY_ID, NOTE, TEMPLATE_ID)
-    VALUES
-    (:id, :title, :module, :frequency, :owner, :due, :priority, :status, :entity, :note, :templateId)`;
-
-const taskBindDefs = {
-  id: { type: oracledb.STRING, maxSize: 100 },
-  title: { type: oracledb.STRING, maxSize: 300 },
-  module: { type: oracledb.STRING, maxSize: 100 },
-  frequency: { type: oracledb.STRING, maxSize: 20 },
-  owner: { type: oracledb.STRING, maxSize: 150 },
-  due: { type: oracledb.NUMBER },
-  priority: { type: oracledb.STRING, maxSize: 20 },
+const progressBindDefs = {
+  checklistId: { type: oracledb.STRING, maxSize: 100 },
+  businessUnitId: { type: oracledb.STRING, maxSize: 100 },
   status: { type: oracledb.STRING, maxSize: 30 },
-  entity: { type: oracledb.STRING, maxSize: 50 },
-  note: { type: oracledb.STRING, maxSize: 4000 },
-  templateId: { type: oracledb.NUMBER }
+  owner: { type: oracledb.STRING, maxSize: 150 },
+  note: { type: oracledb.STRING, maxSize: 4000 }
 };
 
 class HttpError extends Error {
@@ -51,69 +26,118 @@ class HttpError extends Error {
   }
 }
 
-function validateTask(task) {
-  if (!task || typeof task !== 'object' || Array.isArray(task)) {
-    throw new HttpError(400, 'Each task must be a JSON object.');
-  }
-  const stringField = (key, maxLength) => {
-    const value = task[key];
-    if (typeof value !== 'string' || !value.trim() || value.length > maxLength) {
-      throw new HttpError(400, `Task field "${key}" is required and must be at most ${maxLength} characters.`);
-    }
-    return value.trim();
-  };
-  const id = stringField('id', 100);
-  const title = stringField('title', 300);
-  const module = stringField('module', 100);
-  const owner = stringField('owner', 150);
-  const entity = stringField('entity', 50);
-  const { due, frequency, priority, status } = task;
-  if (!Number.isInteger(due) || due < 1 || due > 31) {
-    throw new HttpError(400, 'Task due day must be an integer between 1 and 31.');
-  }
-  if (!frequencies.has(frequency) || !priorities.has(priority) || !statuses.has(status)) {
-    throw new HttpError(400, 'Task frequency, priority, or status is invalid.');
-  }
-  if (task.note !== undefined && (typeof task.note !== 'string' || task.note.length > 4000)) {
-    throw new HttpError(400, 'Task note must be a string of at most 4000 characters.');
-  }
-  if (task.templateId !== null && task.templateId !== undefined &&
-      (!Number.isInteger(task.templateId) || task.templateId < 1)) {
-    throw new HttpError(400, 'Task template ID must be a positive integer or null.');
-  }
-  return {
-    id, title, module, frequency, owner, due, priority, status, entity,
-    note: task.note || '',
-    templateId: task.templateId ?? null
-  };
-}
-
 function mapTask(row) {
   return {
-    id: row.ID,
-    title: row.TITLE,
-    module: row.MODULE_NAME,
-    frequency: row.FREQUENCY,
-    owner: row.OWNER_NAME,
-    due: row.DUE_DAY,
-    priority: row.PRIORITY,
+    id: `${row.CHECKLIST_ROW_ID}:${row.BUSINESS_UNIT_ID}`,
+    checklistRowId: row.CHECKLIST_ROW_ID,
+    checklistNo: row.CHECKLIST_NO,
+    sequence: row.SUM_SEQ,
+    stepId: row.STEP_ID,
+    prerequisiteId: row.PRE_REQUISITE_ID,
+    prerequisiteDescription: row.PRE_REQUISITE_DESC,
+    title: row.STEP_DESCRIPTION,
+    module: row.MODULE_NAME || 'Uncategorized',
+    processOwner: row.PROCESS_OWNER,
+    owner: row.OWNER_NAME || 'Unassigned',
+    actionBy: row.ACTION_BY,
+    due: row.WORKDAYS,
+    targetDate: row.TARGET_DATE,
+    entityScope: row.BUSINESS_UNIT,
+    tpit: row.TPIT,
+    tpidl: row.TPIDL,
+    tenItalyPs: row.TENITALYPS,
+    userRole: row.USER_ROLE,
+    completionCheck: row.COMPLETION_CHECK,
+    expectedOutcome: row.EXPECTED_OUTCOME,
+    actionType: row.ACTION_TYPE,
+    processType: row.PROCESS_TYPE,
+    navigationPath: row.NAVIGATION_PATH,
+    actionDetails: row.ACTION_ITEM_DETAILS,
+    expectedStartTime: row.EXPECTED_START_TIME,
+    expectedCompletionTime: row.EXPECTED_COMP_TIME,
+    suspensionStatus: row.SUSPENSION_STATUS,
+    businessUnitId: row.BUSINESS_UNIT_ID,
+    entity: row.BUSINESS_UNIT_NAME,
+    legalEntityId: row.LEGAL_ENTITY_ID,
+    legalEntityName: row.LEGAL_ENTITY_NAME,
+    ledgerId: row.LEDGER_ID,
+    ledgerName: row.LEDGER_NAME,
+    currency: row.CURRENCY_CODE,
     status: row.STATUS,
-    entity: row.ENTITY_ID,
-    note: row.NOTE || '',
-    templateId: row.TEMPLATE_ID
+    note: row.NOTE || ''
   };
 }
 
 async function readTasks(connection) {
   const result = await connection.execute(
-    `SELECT ID, TITLE, MODULE_NAME, FREQUENCY, OWNER_NAME, DUE_DAY, PRIORITY,
-            STATUS, ENTITY_ID, NOTE, TEMPLATE_ID
-       FROM FIN_CLOSE_TASKS
-      ORDER BY ENTITY_ID, DUE_DAY, ID`,
+    `SELECT TO_CHAR(checklist.CHECKLIST_ROW_ID) AS CHECKLIST_ROW_ID,
+            TO_CHAR(checklist.CHECKLIST_NO) AS CHECKLIST_NO,
+            TO_CHAR(checklist.SUM_SEQ) AS SUM_SEQ,
+            checklist.MODULE_NAME, checklist.PROCESS_OWNER,
+            checklist.STEP_ID, checklist.PRE_REQUISITE_ID,
+            checklist.STEP_DESCRIPTION, checklist.STEP_COMMENT,
+            checklist.ACTION_BY, checklist.WORKDAYS, checklist.TARGET_DATE,
+            checklist.TPIT, checklist.TPIDL, checklist.TENITALYPS,
+            checklist.BUSINESS_UNIT, checklist.USER_ROLE,
+            checklist.COMPLETION_CHECK, checklist.EXPECTED_OUTCOME,
+            checklist.PRE_REQUISITE_DESC, checklist.ACTION_TYPE,
+            checklist.PROCESS_TYPE, checklist.NAVIGATION_PATH,
+            checklist.ACTION_ITEM_DETAILS, checklist.EXPECTED_START_TIME,
+            checklist.EXPECTED_COMP_TIME, checklist.SUSPENSION_STATUS,
+            TO_CHAR(mapping.BUSINESS_UNIT_ID) AS BUSINESS_UNIT_ID,
+            mapping.BUSINESS_UNIT_NAME,
+            TO_CHAR(mapping.LEGAL_ENTITY_ID) AS LEGAL_ENTITY_ID,
+            mapping.LEGAL_ENTITY_NAME,
+            TO_CHAR(mapping.LEDGER_ID) AS LEDGER_ID,
+            mapping.LEDGER_NAME, mapping.CURRENCY_CODE,
+            NVL(progress.STATUS, 'Not started') AS STATUS,
+            NVL(progress.OWNER_NAME,
+                NVL(checklist.ASSIGNED_USER,
+                    NVL(checklist.ACTION_BY, checklist.PROCESS_OWNER))) AS OWNER_NAME,
+            CASE WHEN progress.NOTE_OVERRIDDEN = 'Y' THEN progress.NOTE
+                 ELSE checklist.STEP_COMMENT END AS NOTE
+       FROM XX_OPERATIONAL_CHECKLIST checklist
+       CROSS JOIN XX_BU_LE_LEDGER_MAPPING mapping
+       LEFT JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS progress
+         ON progress.CHECKLIST_ROW_ID = TO_CHAR(checklist.CHECKLIST_ROW_ID)
+        AND progress.BUSINESS_UNIT_ID = TO_CHAR(mapping.BUSINESS_UNIT_ID)
+      ORDER BY mapping.BUSINESS_UNIT_NAME, checklist.CHECKLIST_NO,
+               checklist.SUM_SEQ, checklist.CHECKLIST_ROW_ID`,
     [],
     { outFormat: oracledb.OUT_FORMAT_OBJECT }
   );
   return result.rows.map(mapTask);
+}
+
+async function readEntities(connection) {
+  const result = await connection.execute(
+    `SELECT TO_CHAR(BUSINESS_UNIT_ID) AS BUSINESS_UNIT_ID,
+            BUSINESS_UNIT_NAME,
+            TO_CHAR(LEGAL_ENTITY_ID) AS LEGAL_ENTITY_ID,
+            LEGAL_ENTITY_NAME,
+            TO_CHAR(LEDGER_ID) AS LEDGER_ID,
+            LEDGER_NAME,
+            CURRENCY_CODE
+       FROM XX_BU_LE_LEDGER_MAPPING
+      ORDER BY BUSINESS_UNIT_NAME`,
+    [],
+    { outFormat: oracledb.OUT_FORMAT_OBJECT }
+  );
+  return result.rows.map(row => ({
+    id: row.BUSINESS_UNIT_ID,
+    name: row.BUSINESS_UNIT_NAME,
+    legalEntityId: row.LEGAL_ENTITY_ID,
+    legalEntityName: row.LEGAL_ENTITY_NAME,
+    ledgerId: row.LEDGER_ID,
+    ledgerName: row.LEDGER_NAME,
+    currency: row.CURRENCY_CODE
+  }));
+}
+
+function parseTaskId(id) {
+  const match = id.match(/^(\d+):(\d+)$/);
+  if (!match) throw new HttpError(400, 'Task ID must identify a checklist row and business unit.');
+  return { checklistId: match[1], businessUnitId: match[2] };
 }
 
 async function readRequestBody(request) {
@@ -213,59 +237,9 @@ async function main() {
       if (request.method === 'GET' && url.pathname === '/api/tasks') {
         const connection = await pool.getConnection();
         try {
-          sendJson(response, 200, await readTasks(connection));
-        } finally {
-          await connection.close();
-        }
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/tasks/initialize') {
-        const body = await readRequestBody(request);
-        if (!body || typeof body !== 'object' || !Array.isArray(body.tasks) || body.tasks.length > 2000) {
-          throw new HttpError(400, 'Initialization requires a task array containing at most 2000 tasks.');
-        }
-        const tasks = body.tasks.map(validateTask);
-        const connection = await pool.getConnection();
-        try {
-          const count = await connection.execute('SELECT COUNT(*) AS TOTAL FROM FIN_CLOSE_TASKS', [], {
-            outFormat: oracledb.OUT_FORMAT_OBJECT
-          });
-          if (count.rows[0].TOTAL === 0 && tasks.length > 0) {
-            await connection.executeMany(mergeSql, tasks, { bindDefs: taskBindDefs, autoCommit: false });
-            await connection.commit();
-          }
-          sendJson(response, 200, await readTasks(connection));
-        } catch (error) {
-          await connection.rollback();
-          throw error;
-        } finally {
-          await connection.close();
-        }
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/tasks') {
-        const body = await readRequestBody(request);
-        if (!body || typeof body !== 'object' || !Array.isArray(body.tasks) ||
-            body.tasks.length < 1 || body.tasks.length > 100) {
-          throw new HttpError(400, 'Task creation requires between 1 and 100 tasks.');
-        }
-        const tasks = body.tasks.map(validateTask);
-        const connection = await pool.getConnection();
-        try {
-          await connection.executeMany(
-            `INSERT INTO FIN_CLOSE_TASKS
-              (ID, TITLE, MODULE_NAME, FREQUENCY, OWNER_NAME, DUE_DAY, PRIORITY, STATUS, ENTITY_ID, NOTE, TEMPLATE_ID)
-             VALUES (:id, :title, :module, :frequency, :owner, :due, :priority, :status, :entity, :note, :templateId)`,
-            tasks,
-            { bindDefs: taskBindDefs, autoCommit: false }
-          );
-          await connection.commit();
-          sendJson(response, 201, tasks);
-        } catch (error) {
-          await connection.rollback();
-          throw error;
+          const tasks = await readTasks(connection);
+          const entities = await readEntities(connection);
+          sendJson(response, 200, { tasks, entities });
         } finally {
           await connection.close();
         }
@@ -274,41 +248,89 @@ async function main() {
 
       const taskMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
       if (request.method === 'PATCH' && taskMatch) {
-        const id = decodeURIComponent(taskMatch[1]);
+        const { checklistId, businessUnitId } = parseTaskId(decodeURIComponent(taskMatch[1]));
         const patch = await readRequestBody(request);
         if (!patch || typeof patch !== 'object' || Array.isArray(patch) ||
-            Object.keys(patch).some(key => !Object.hasOwn(editableColumns, key))) {
-          throw new HttpError(400, 'Only entity, status, owner, due, and note can be updated.');
+            Object.keys(patch).some(key => !['status', 'owner', 'note'].includes(key)) ||
+            !Object.hasOwn(patch, 'status') || !Object.hasOwn(patch, 'owner') || !Object.hasOwn(patch, 'note')) {
+          throw new HttpError(400, 'Updates must include status, owner, and note only.');
         }
+        if (!statuses.has(patch.status)) {
+          throw new HttpError(400, 'Task status is invalid.');
+        }
+        if (typeof patch.owner !== 'string' || !patch.owner.trim() || patch.owner.trim().length > 150) {
+          throw new HttpError(400, 'Task owner is required and must be at most 150 characters.');
+        }
+        if (typeof patch.note !== 'string' || patch.note.length > 4000) {
+          throw new HttpError(400, 'Task note must be a string of at most 4000 characters.');
+        }
+        const progress = {
+          checklistId,
+          businessUnitId,
+          status: patch.status,
+          owner: patch.owner.trim(),
+          note: patch.note
+        };
         const connection = await pool.getConnection();
         try {
-          const current = await connection.execute(
-            `SELECT ID, TITLE, MODULE_NAME, FREQUENCY, OWNER_NAME, DUE_DAY, PRIORITY,
-                    STATUS, ENTITY_ID, NOTE, TEMPLATE_ID
-               FROM FIN_CLOSE_TASKS WHERE ID = :id`,
-            { id },
+          const source = await connection.execute(
+            `SELECT 1
+               FROM XX_OPERATIONAL_CHECKLIST checklist
+               CROSS JOIN XX_BU_LE_LEDGER_MAPPING mapping
+              WHERE TO_CHAR(checklist.CHECKLIST_ROW_ID) = :checklistId
+                AND TO_CHAR(mapping.BUSINESS_UNIT_ID) = :businessUnitId`,
+            { checklistId, businessUnitId },
             { outFormat: oracledb.OUT_FORMAT_OBJECT }
           );
-          if (current.rows.length === 0) throw new HttpError(404, 'Task not found.');
-          const task = validateTask({ ...mapTask(current.rows[0]), ...patch });
-          const fields = Object.keys(patch);
-          if (fields.length > 0) {
-            const setClauses = fields.map(field => `${editableColumns[field]} = :${field}`);
-            setClauses.push('UPDATED_AT = SYSTIMESTAMP');
-            await connection.execute(
-              `UPDATE FIN_CLOSE_TASKS SET ${setClauses.join(', ')} WHERE ID = :id`,
-              Object.fromEntries([...fields.map(field => [field, task[field]]), ['id', id]]),
-              { autoCommit: true }
-            );
-          }
+          if (source.rows.length === 0) throw new HttpError(404, 'Checklist task not found.');
+          await connection.execute(
+            `MERGE INTO XX_OPERATIONAL_CHECKLIST_PROGRESS target
+             USING (
+               SELECT :checklistId AS CHECKLIST_ROW_ID,
+                      :businessUnitId AS BUSINESS_UNIT_ID
+                 FROM DUAL
+             ) source
+                ON (target.CHECKLIST_ROW_ID = source.CHECKLIST_ROW_ID
+                    AND target.BUSINESS_UNIT_ID = source.BUSINESS_UNIT_ID)
+             WHEN MATCHED THEN UPDATE SET
+               target.STATUS = :status,
+               target.OWNER_NAME = :owner,
+               target.NOTE = :note,
+               target.NOTE_OVERRIDDEN = 'Y',
+               target.UPDATED_AT = SYSTIMESTAMP
+             WHEN NOT MATCHED THEN INSERT
+               (CHECKLIST_ROW_ID, BUSINESS_UNIT_ID, STATUS, OWNER_NAME, NOTE, NOTE_OVERRIDDEN)
+               VALUES
+               (:checklistId, :businessUnitId, :status, :owner, :note, 'Y')`,
+            progress,
+            { bindDefs: progressBindDefs, autoCommit: true }
+          );
           const updated = await connection.execute(
-            `SELECT ID, TITLE, MODULE_NAME, FREQUENCY, OWNER_NAME, DUE_DAY, PRIORITY,
-                    STATUS, ENTITY_ID, NOTE, TEMPLATE_ID
-               FROM FIN_CLOSE_TASKS WHERE ID = :id`,
-            { id },
+            `SELECT TO_CHAR(checklist.CHECKLIST_ROW_ID) AS CHECKLIST_ROW_ID,
+                    TO_CHAR(mapping.BUSINESS_UNIT_ID) AS BUSINESS_UNIT_ID,
+                    NVL(progress.STATUS, 'Not started') AS STATUS,
+                    NVL(progress.OWNER_NAME,
+                        NVL(checklist.ASSIGNED_USER,
+                            NVL(checklist.ACTION_BY, checklist.PROCESS_OWNER))) AS OWNER_NAME,
+                    CASE WHEN progress.NOTE_OVERRIDDEN = 'Y' THEN progress.NOTE
+                         ELSE checklist.STEP_COMMENT END AS NOTE
+               FROM XX_OPERATIONAL_CHECKLIST checklist
+               CROSS JOIN XX_BU_LE_LEDGER_MAPPING mapping
+               LEFT JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS progress
+                 ON progress.CHECKLIST_ROW_ID = TO_CHAR(checklist.CHECKLIST_ROW_ID)
+                AND progress.BUSINESS_UNIT_ID = TO_CHAR(mapping.BUSINESS_UNIT_ID)
+              WHERE TO_CHAR(checklist.CHECKLIST_ROW_ID) = :checklistId
+                AND TO_CHAR(mapping.BUSINESS_UNIT_ID) = :businessUnitId`,
+            { checklistId, businessUnitId },
             { outFormat: oracledb.OUT_FORMAT_OBJECT }
           );
-          sendJson(response, 200, mapTask(updated.rows[0]));
+          const task = updated.rows[0];
+          sendJson(response, 200, {
+            id: `${task.CHECKLIST_ROW_ID}:${task.BUSINESS_UNIT_ID}`,
+            status: task.STATUS,
+            owner: task.OWNER_NAME,
+            note: task.NOTE || ''
+          });
         } finally {
           await connection.close();
         }
