@@ -49,7 +49,11 @@ async function apiRequest(path, options = {}) {
   }
 
   if (!response.ok) {
-    throw new Error(result?.error || `Request failed (${response.status})`);
+    const message = result?.error ||
+      (response.status >= 500 && !rawText
+        ? 'The API server did not respond. In development, start it with `npm run api` in a separate terminal and configure Oracle settings in `.env`.'
+        : `Request failed (${response.status})`);
+    throw new Error(message);
   }
 
   return result;
