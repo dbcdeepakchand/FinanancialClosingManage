@@ -72,11 +72,14 @@ function seedTasks() {
 
 const initialSeed = seedTasks();
 
-function readSaved() {
-  try {
-    const saved = localStorage.getItem('finance-close-tasks-v1');
-    return saved ? JSON.parse(saved) : initialSeed;
-  } catch { return initialSeed; }
+async function apiRequest(path, options = {}) {
+  const response = await fetch(`/api${path}`, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...options.headers }
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+  return result;
 }
 
 function StatusPill({status}) {
@@ -97,7 +100,11 @@ function StatCard({label,value,sub,icon:Icon,tone,trend}) {
 }
 
 export default function App() {
-  const [tasks,setTasks] = useState(readSaved);
+  const [tasks,setTasks] = useState([]);
+  const [loading,setLoading] = useState(true);
+  const [apiError,setApiError] = useState('');
+  const [reloadCount,setReloadCount] = useState(0);
+  const [saving,setSaving] = useState(false);
   const [period,setPeriod] = useState('Monthly');
   const [month,setMonth] = useState('October 2026');
   const [page,setPage] = useState('dashboard');
@@ -111,7 +118,30 @@ export default function App() {
   const [newTask,setNewTask] = useState({title:'',module:'General Ledger',owner:'GL Team',due:5,priority:'Medium',frequency:'Both',entity:'TE-IN'});
   const [detailTask,setDetailTask] = useState(null);
 
-  useEffect(() => { localStorage.setItem('finance-close-tasks-v1', JSON.stringify(tasks)); }, [tasks]);
+  useEffect(() => {
+    let cancelled = false;
+    const loadTasks = async () => {
+      setLoading(true);
+      setApiError('');
+      try {
+        let loadedTasks = await apiRequest('/tasks');
+        if (loadedTasks.length === 0) {
+          loadedTasks = await apiRequest('/tasks/initialize', {
+            method: 'POST',
+            body: JSON.stringify({ tasks: initialSeed })
+          });
+        }
+        if (!cancelled) setTasks(loadedTasks);
+      } catch (error) {
+        if (!cancelled) setApiError(`Could not load tasks from Oracle: ${error.message}`);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    loadTasks();
+    return () => { cancelled = true; };
+  }, [reloadCount]);
+
   useEffect(() => { if(toast) { const timer=setTimeout(()=>setToast(''),3200); return ()=>clearTimeout(timer); } },[toast]);
 
   const applicable = useMemo(() => tasks.filter(t => t.frequency === 'Both' || t.frequency === period), [tasks,period]);
@@ -139,8 +169,31 @@ export default function App() {
   const modules = [...new Set(applicable.map(t=>t.module))].sort();
 
   const updateTask = (id,patch) => {
-    setTasks(prev=>prev.map(t=>t.id===id?{...t,...patch}:t));
     setDetailTask(prev=>prev && prev.id===id?{...prev,...patch}:prev);
+  };
+
+  const saveTask = async () => {
+    setSaving(true);
+    setApiError('');
+    try {
+      const savedTask = await apiRequest(`/tasks/${encodeURIComponent(detailTask.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          entity: detailTask.entity,
+          status: detailTask.status,
+          owner: detailTask.owner,
+          due: detailTask.due,
+          note: detailTask.note || ''
+        })
+      });
+      setTasks(prev=>prev.map(task=>task.id===savedTask.id?savedTask:task));
+      setDetailTask(null);
+      setToast('Task changes saved to Oracle.');
+    } catch (error) {
+      setApiError(`Could not save task: ${error.message}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const exportCsv = () => {
@@ -156,7 +209,7 @@ export default function App() {
     setToast('Checklist exported to CSV');
   };
 
-  const addTask = (e) => {
+  const addTask = async (e) => {
     e.preventDefault();
     if(!newTask.title.trim()) return;
     const targets = newTask.entity === 'ALL' ? entities : entities.filter(x=>x.id===newTask.entity);
@@ -164,10 +217,22 @@ export default function App() {
       ...newTask,id:`custom-${Date.now()}-${idx}`,templateId:null,entity:entity.id,
       title:newTask.title.trim(),due:Number(newTask.due),status:'Not started',note:'',frequency:newTask.frequency
     }));
-    setTasks(prev=>[...prev,...additions]);
-    setShowAdd(false);
-    setNewTask({title:'',module:'General Ledger',owner:'GL Team',due:5,priority:'Medium',frequency:'Both',entity:'TE-IN'});
-    setToast(`Task created for ${targets.length} ${targets.length===1?'entity':'entities'}`);
+    setSaving(true);
+    setApiError('');
+    try {
+      const savedTasks = await apiRequest('/tasks', {
+        method: 'POST',
+        body: JSON.stringify({ tasks: additions })
+      });
+      setTasks(prev=>[...prev,...savedTasks]);
+      setShowAdd(false);
+      setNewTask({title:'',module:'General Ledger',owner:'GL Team',due:5,priority:'Medium',frequency:'Both',entity:'TE-IN'});
+      setToast(`Task created for ${targets.length} ${targets.length===1?'entity':'entities'} in Oracle.`);
+    } catch (error) {
+      setApiError(`Could not create task: ${error.message}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const pageTitle = navItems.find(n=>n.id===page)?.label || 'Dashboard';
@@ -213,6 +278,8 @@ export default function App() {
         </div>
       </header>
 
+      {apiError && <div className="api-error" role="alert"><span>{apiError}</span><button className="btn secondary compact" onClick={()=>setReloadCount(count=>count+1)} disabled={loading}>Retry</button></div>}
+      {loading && <div className="api-loading" role="status">Connecting to Oracle and loading close tasks…</div>}
       <div className="page-content">
         {page==='dashboard' && <Dashboard
           period={period} month={month} completion={completion} completedCount={completedCount}
@@ -270,6 +337,7 @@ export default function App() {
     {detailTask && <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setDetailTask(null)}}><div className="detail-drawer">
       <div className="drawer-head"><div><div className="eyebrow">TASK DETAILS</div><h2>Close activity</h2></div><button className="icon-btn" onClick={()=>setDetailTask(null)}><X size={19}/></button></div>
       <div className="drawer-body">
+        {apiError && <p className="form-error" role="alert">{apiError}</p>}
         <span className="module-chip">{detailTask.module}</span><h3 className="drawer-task-title">{detailTask.title}</h3><div className="drawer-status-row"><StatusPill status={detailTask.status}/><span className={`priority ${detailTask.priority.toLowerCase()}`}>{detailTask.priority} priority</span></div>
         <label className="field-label">Legal entity</label><select className="field-control" value={detailTask.entity} onChange={e=>updateTask(detailTask.id,{entity:e.target.value})}>{entities.map(e=><option value={e.id} key={e.id}>{e.name}</option>)}</select>
         <label className="field-label">Task status</label><select className="field-control" value={detailTask.status} onChange={e=>updateTask(detailTask.id,{status:e.target.value})}><option>Not started</option><option>In progress</option><option>Blocked</option><option>Complete</option></select>
@@ -278,11 +346,12 @@ export default function App() {
         <label className="field-label">Comments / blockers</label><textarea className="field-control textarea" rows="4" placeholder="Add progress notes, blockers or handover comments..." value={detailTask.note||''} onChange={e=>updateTask(detailTask.id,{note:e.target.value})}/>
         <div className="drawer-note"><ShieldCheck size={16}/><span>Production version should record who changed the task, when it changed, and approval evidence in an immutable audit trail.</span></div>
       </div>
-      <div className="drawer-footer"><button className="btn secondary" onClick={()=>setDetailTask(null)}>Close</button><button className="btn primary" onClick={()=>{setDetailTask(null);setToast('Task changes saved in this browser.')}}><Check size={16}/> Save changes</button></div>
+      <div className="drawer-footer"><button className="btn secondary" onClick={()=>setDetailTask(null)}>Cancel</button><button className="btn primary" onClick={saveTask} disabled={saving}><Check size={16}/>{saving?'Saving…':'Save changes'}</button></div>
     </div></div>}
 
     {showAdd && <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setShowAdd(false)}}><form className="add-modal" onSubmit={addTask}>
       <div className="drawer-head"><div><div className="eyebrow">CHECKLIST CONFIGURATION</div><h2>Add close activity</h2></div><button type="button" className="icon-btn" onClick={()=>setShowAdd(false)}><X size={19}/></button></div>
+      {apiError && <p className="form-error modal-error" role="alert">{apiError}</p>}
       <div className="form-grid">
         <div className="form-field full"><label>Activity name *</label><input required autoFocus value={newTask.title} onChange={e=>setNewTask({...newTask,title:e.target.value})} placeholder="e.g. Review manual journal entries"/></div>
         <div className="form-field"><label>Module</label><select value={newTask.module} onChange={e=>setNewTask({...newTask,module:e.target.value})}>{['General Ledger','Accounts Payable','Accounts Receivable','Cash Management','Expenses','Fixed Assets','Project Accounting','Intercompany','Tax','Reporting','Accounting'].map(m=><option key={m}>{m}</option>)}</select></div>
@@ -292,7 +361,7 @@ export default function App() {
         <div className="form-field"><label>Close frequency</label><select value={newTask.frequency} onChange={e=>setNewTask({...newTask,frequency:e.target.value})}><option value="Both">Monthly and quarterly</option><option value="Monthly">Monthly only</option><option value="Quarterly">Quarterly only</option></select></div>
         <div className="form-field"><label>Apply to</label><select value={newTask.entity} onChange={e=>setNewTask({...newTask,entity:e.target.value})}><option value="ALL">All 12 entities</option>{entities.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select></div>
       </div>
-      <div className="modal-actions"><button type="button" className="btn secondary" onClick={()=>setShowAdd(false)}>Cancel</button><button type="submit" className="btn primary"><Plus size={16}/> Create task</button></div>
+      <div className="modal-actions"><button type="button" className="btn secondary" onClick={()=>setShowAdd(false)}>Cancel</button><button type="submit" className="btn primary" disabled={saving}><Plus size={16}/>{saving?'Saving…':'Create task'}</button></div>
     </form></div>}
     {toast && <div className="toast"><CheckCircle2 size={17}/>{toast}<button onClick={()=>setToast('')}><X size={15}/></button></div>}
   </div>;
