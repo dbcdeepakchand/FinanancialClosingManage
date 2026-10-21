@@ -1,15 +1,19 @@
-import 'dotenv/config';
-import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import oracledb from 'oracledb';
+//import 'dotenv/config';
+//import { createServer } from 'node:http';
+//import { readFile, stat } from 'node:fs/promises';
+//import path from 'node:path';
+//import { fileURLToPath } from 'node:url';
+//import oracledb from 'oracledb';
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const oracledb = require('oracledb');
+const path = require('path');
+const { createServer } = require('http');
+//oracledb.initOracleClient();
 
-oracledb.initOracleClient({
-  libDir: 'C:\\Oracle\\instantclient_23_8'
-});
-
-const root = path.dirname(fileURLToPath(import.meta.url));
+//const root = path.dirname(fileURLToPath(import.meta.url));
+const root = __dirname;
 const distDirectory = path.join(root, 'dist');
 const port = Number(process.env.PORT || 3001);
 const host = process.env.HOST || '127.0.0.1';
