@@ -32,13 +32,13 @@ A React + Vite finance-close application with a Node.js API that connects direct
    | --- | --- | --- |
    | `XX_OPERATIONAL_CHECKLIST` | One checklist step per row | `CHECKLIST_ROW_ID`, `MODULE_NAME`, `BUSINESS_UNIT`, `LEGAL_ENTITY`, `PROCESS_OWNER`, `STEP_DESCRIPTION`, `STEP_COMMENT`, `ACTION_BY`, `PRE_REQUISITE_DESC`, `ACTION_TYPE`, `PROCESS_TYPE`, plus WHO audit columns |
    | `XX_OPERATIONAL_CHECKLIST_PROGRESS` | Editable workflow status, owner and comment per checklist row | `CHECKLIST_ROW_ID`, `BUSINESS_UNIT_ID`, `STATUS`, `OWNER_NAME`, `NOTE`, `NOTE_OVERRIDDEN`, `CREATED_AT`, `UPDATED_AT` |
-   | `XX_BU_LE_LEDGER_MAPPING` | Uploaded business unit, legal entity and ledger reference data | `BUSINESS_UNIT_ID`, `BUSINESS_UNIT_NAME`, `LEGAL_ENTITY_ID`, `LEGAL_ENTITY_NAME`, `LEDGER_ID`, `LEDGER_NAME`, `CURRENCY_CODE` |
+   | `XX_BU_LE_LEDGER_MAPPING` | Uploaded business unit, legal entity and ledger reference data | `BUSINESS_UNIT_ID`, `BUSINESS_UNIT_NAME`, `LEGAL_ENTITY_ID`, `LEGAL_ENTITY_NAME`, `LEDGER_ID`, `LEDGER_NAME`, `CURRENCY_CODE`, `CUTOFF_DATE`, `DUE_DAYS` |
 
    The checklist stores business unit and legal entity names directly. Workflow progress uses the checklist row ID and business-unit name as its key.
 
    Run [schema.sql](./DBConnect/schema.sql) once to create `XX_OPERATIONAL_CHECKLIST` and `XX_OPERATIONAL_CHECKLIST_PROGRESS`. Create `XX_BU_LE_LEDGER_MAPPING` separately before uploading its data.
 
-   The Data source section provides header-only CSV templates for `XX_OPERATIONAL_CHECKLIST` and `XX_BU_LE_LEDGER_MAPPING`. Keep the template column names unchanged and enter one source row per CSV row. Uploads append rows transactionally; invalid database rows reject the entire upload without partial inserts. Each upload supports up to 5,000 rows and 5 MB. Business-unit/ledger mapping rows are uploaded to the reference table; checklist rows use the business unit and legal entity values in their own source columns.
+   The Data source section provides header-only CSV templates for `XX_OPERATIONAL_CHECKLIST` and `XX_BU_LE_LEDGER_MAPPING`. Keep the template column names unchanged and enter one source row per CSV row. Mapping uploads accept optional `CUTOFF_DATE` values in `YYYY-MM-DD` format and optional numeric `DUE_DAYS` values; leave either cell blank when it is not applicable. Uploads append rows transactionally; invalid database rows reject the entire upload without partial inserts. Each upload supports up to 5,000 rows and 5 MB. Business-unit/ledger mapping rows are uploaded to the reference table; checklist rows use the business unit and legal entity values in their own source columns.
 
 3. Copy `.env.example` to `.env` and set `DB_USER`, `DB_PASSWORD` and `DB_CONNECT_STRING`. For Autonomous Database, also set `DB_WALLET_LOCATION` and `DB_WALLET_PASSWORD`. Keep `.env` private; it is excluded from Git.
 

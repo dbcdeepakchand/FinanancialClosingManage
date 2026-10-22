@@ -33,13 +33,15 @@ const importSources = {
     table: 'XX_BU_LE_LEDGER_MAPPING',
     columns: [
       'BUSINESS_UNIT_ID', 'BUSINESS_UNIT_NAME', 'LEGAL_ENTITY_ID', 'LEGAL_ENTITY_NAME',
-      'LEDGER_ID', 'LEDGER_NAME', 'CURRENCY_CODE'
+      'LEDGER_ID', 'LEDGER_NAME', 'CURRENCY_CODE', 'CUTOFF_DATE', 'DUE_DAYS'
     ],
     required: [
       'BUSINESS_UNIT_ID', 'BUSINESS_UNIT_NAME', 'LEGAL_ENTITY_ID',
       'LEGAL_ENTITY_NAME', 'LEDGER_ID', 'LEDGER_NAME'
     ],
-    numericIds: ['BUSINESS_UNIT_ID']
+    numericIds: ['BUSINESS_UNIT_ID'],
+    numericColumns: ['DUE_DAYS'],
+    dateColumns: ['CUTOFF_DATE']
   }
 };
 const progressBindDefs = {
@@ -280,14 +282,49 @@ async function main() {
             }
             values[column] = values[column].trim();
           }
+          for (const column of source.numericColumns || []) {
+            if (values[column] === null) continue;
+            const numericText = values[column].trim();
+            if (!numericText) {
+              values[column] = null;
+              continue;
+            }
+            const numericValue = Number(numericText);
+            if (!Number.isFinite(numericValue)) {
+              throw new HttpError(400, `Row ${index + 1}: ${column} must be a valid number.`);
+            }
+            values[column] = numericValue;
+          }
+          for (const column of source.dateColumns || []) {
+            if (values[column] === null) continue;
+            const dateValue = values[column].trim();
+            const match = dateValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+            if (!dateValue) {
+              values[column] = null;
+              continue;
+            }
+            const parsedDate = new Date(`${dateValue}T00:00:00.000Z`);
+            if (!match || Number.isNaN(parsedDate.getTime()) ||
+                parsedDate.toISOString().slice(0, 10) !== dateValue) {
+              throw new HttpError(400, `Row ${index + 1}: ${column} must use a valid YYYY-MM-DD date.`);
+            }
+            values[column] = dateValue;
+          }
           return values;
         });
 
-        const binds = Object.fromEntries(source.columns.map(column => [
-          column,
-          { type: oracledb.STRING, maxSize: 4000 }
-        ]));
-        const placeholders = source.columns.map(column => `:${column}`).join(', ');
+        const binds = Object.fromEntries(source.columns.map(column => {
+          const isNumeric = (source.numericColumns || []).includes(column);
+          return [column, {
+            type: isNumeric ? oracledb.NUMBER : oracledb.STRING,
+            ...(!isNumeric ? { maxSize: 4000 } : {})
+          }];
+        }));
+        const placeholders = source.columns.map(column =>
+          (source.dateColumns || []).includes(column)
+            ? `TO_DATE(:${column}, 'YYYY-MM-DD')`
+            : `:${column}`
+        ).join(', ');
         const sql = `INSERT INTO ${source.table} (${source.columns.join(', ')}) VALUES (${placeholders})`;
         const connection = await pool.getConnection();
         try {
