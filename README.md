@@ -29,6 +29,14 @@ A React + Vite finance-close application with a Node.js API that connects direct
 
 3. Copy `.env.example` to `.env` and set `DB_USER`, `DB_PASSWORD` and `DB_CONNECT_STRING`. For Autonomous Database, also set `DB_WALLET_LOCATION` and `DB_WALLET_PASSWORD`. Keep `.env` private; it is excluded from Git.
 
+   If the API reports `NJS-533` with `ORA-12660`, the database requires Native Network Encryption or Data Integrity, which node-oracledb Thin mode does not support. Install the Oracle Instant Client that matches the API process architecture, then add its library directory to the API's `.env` file:
+
+   ```dotenv
+   ORACLE_CLIENT_LIB_DIR=C:\oracle\instantclient_23_7
+   ```
+
+   On Windows, ensure the Instant Client directory is also on `PATH` if it contains dependent DLLs. The API initializes node-oracledb in Thick mode when `ORACLE_CLIENT_LIB_DIR` is set; leave it unset to keep using Thin mode. If your database administrator can instead configure a compatible connection policy, that is another option.
+
 4. Start the API and Vite in separate terminals:
 
    ```powershell

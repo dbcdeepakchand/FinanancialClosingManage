@@ -10,7 +10,6 @@ const cors = require('cors');
 const oracledb = require('oracledb');
 const path = require('path');
 const { createServer } = require('http');
-//oracledb.initOracleClient();
 
 //const root = path.dirname(fileURLToPath(import.meta.url));
 const root = __dirname;
@@ -215,6 +214,10 @@ async function main() {
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error('PORT must be a valid TCP port.');
+  }
+
+  if (process.env.ORACLE_CLIENT_LIB_DIR) {
+    oracledb.initOracleClient({ libDir: process.env.ORACLE_CLIENT_LIB_DIR });
   }
 
   const pool = await oracledb.createPool({
