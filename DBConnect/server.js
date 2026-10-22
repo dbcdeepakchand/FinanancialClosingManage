@@ -23,15 +23,11 @@ const importSources = {
   checklist: {
     table: 'XX_OPERATIONAL_CHECKLIST',
     columns: [
-      'CHECKLIST_ROW_ID', 'CHECKLIST_NO', 'SUM_SEQ', 'MODULE_NAME', 'PROCESS_OWNER',
-      'STEP_ID', 'PRE_REQUISITE_ID', 'PRE_REQUISITE_DESC', 'STEP_DESCRIPTION',
-      'STEP_COMMENT', 'ACTION_BY', 'WORKDAYS', 'TARGET_DATE', 'TPIT', 'TPIDL',
-      'TENITALYPS', 'BUSINESS_UNIT', 'USER_ROLE', 'ASSIGNED_USER', 'COMPLETION_CHECK',
-      'EXPECTED_OUTCOME', 'ACTION_TYPE', 'PROCESS_TYPE', 'NAVIGATION_PATH',
-      'ACTION_ITEM_DETAILS', 'EXPECTED_START_TIME', 'EXPECTED_COMP_TIME', 'SUSPENSION_STATUS'
+      'MODULE_NAME', 'BUSINESS_UNIT', 'LEGAL_ENTITY', 'PROCESS_OWNER',
+      'STEP_DESCRIPTION', 'STEP_COMMENT', 'ACTION_BY', 'PRE_REQUISITE_DESC',
+      'ACTION_TYPE', 'PROCESS_TYPE'
     ],
-    required: ['CHECKLIST_ROW_ID', 'STEP_DESCRIPTION'],
-    numericIds: ['CHECKLIST_ROW_ID']
+    required: ['BUSINESS_UNIT', 'STEP_DESCRIPTION']
   },
   mapping: {
     table: 'XX_BU_LE_LEDGER_MAPPING',
@@ -48,7 +44,7 @@ const importSources = {
 };
 const progressBindDefs = {
   checklistId: { type: oracledb.STRING, maxSize: 100 },
-  businessUnitId: { type: oracledb.STRING, maxSize: 100 },
+  businessUnitId: { type: oracledb.STRING, maxSize: 255 },
   status: { type: oracledb.STRING, maxSize: 30 },
   owner: { type: oracledb.STRING, maxSize: 150 },
   note: { type: oracledb.STRING, maxSize: 4000 }
@@ -63,41 +59,21 @@ class HttpError extends Error {
 
 function mapTask(row) {
   return {
-    id: `${row.CHECKLIST_ROW_ID}:${row.BUSINESS_UNIT_ID}`,
+    id: row.CHECKLIST_ROW_ID,
     checklistRowId: row.CHECKLIST_ROW_ID,
-    checklistNo: row.CHECKLIST_NO,
-    sequence: row.SUM_SEQ,
-    stepId: row.STEP_ID,
-    prerequisiteId: row.PRE_REQUISITE_ID,
-    prerequisiteDescription: row.PRE_REQUISITE_DESC,
     title: row.STEP_DESCRIPTION,
+    moduleName: row.MODULE_NAME,
     module: row.MODULE_NAME || 'Uncategorized',
     processOwner: row.PROCESS_OWNER,
     owner: row.OWNER_NAME || 'Unassigned',
     actionBy: row.ACTION_BY,
-    due: row.WORKDAYS,
-    targetDate: row.TARGET_DATE,
-    entityScope: row.BUSINESS_UNIT,
-    tpit: row.TPIT,
-    tpidl: row.TPIDL,
-    tenItalyPs: row.TENITALYPS,
-    userRole: row.USER_ROLE,
-    completionCheck: row.COMPLETION_CHECK,
-    expectedOutcome: row.EXPECTED_OUTCOME,
+    prerequisiteDescription: row.PRE_REQUISITE_DESC,
+    stepComment: row.STEP_COMMENT,
     actionType: row.ACTION_TYPE,
     processType: row.PROCESS_TYPE,
-    navigationPath: row.NAVIGATION_PATH,
-    actionDetails: row.ACTION_ITEM_DETAILS,
-    expectedStartTime: row.EXPECTED_START_TIME,
-    expectedCompletionTime: row.EXPECTED_COMP_TIME,
-    suspensionStatus: row.SUSPENSION_STATUS,
     businessUnitId: row.BUSINESS_UNIT_ID,
-    entity: row.BUSINESS_UNIT_NAME,
-    legalEntityId: row.LEGAL_ENTITY_ID,
-    legalEntityName: row.LEGAL_ENTITY_NAME,
-    ledgerId: row.LEDGER_ID,
-    ledgerName: row.LEDGER_NAME,
-    currency: row.CURRENCY_CODE,
+    entity: row.BUSINESS_UNIT,
+    legalEntityName: row.LEGAL_ENTITY,
     status: row.STATUS,
     note: row.NOTE || ''
   };
@@ -106,38 +82,25 @@ function mapTask(row) {
 async function readTasks(connection) {
   const result = await connection.execute(
     `SELECT TO_CHAR(checklist.CHECKLIST_ROW_ID) AS CHECKLIST_ROW_ID,
-            TO_CHAR(checklist.CHECKLIST_NO) AS CHECKLIST_NO,
-            TO_CHAR(checklist.SUM_SEQ) AS SUM_SEQ,
-            checklist.MODULE_NAME, checklist.PROCESS_OWNER,
-            checklist.STEP_ID, checklist.PRE_REQUISITE_ID,
-            checklist.STEP_DESCRIPTION, checklist.STEP_COMMENT,
-            checklist.ACTION_BY, checklist.WORKDAYS, checklist.TARGET_DATE,
-            checklist.TPIT, checklist.TPIDL, checklist.TENITALYPS,
-            checklist.BUSINESS_UNIT, checklist.USER_ROLE,
-            checklist.COMPLETION_CHECK, checklist.EXPECTED_OUTCOME,
+            checklist.MODULE_NAME,
+            NVL(checklist.BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT,
+            checklist.LEGAL_ENTITY,
+            NVL(checklist.BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT_ID,
+            checklist.PROCESS_OWNER, checklist.STEP_DESCRIPTION,
+            checklist.STEP_COMMENT, checklist.ACTION_BY,
             checklist.PRE_REQUISITE_DESC, checklist.ACTION_TYPE,
-            checklist.PROCESS_TYPE, checklist.NAVIGATION_PATH,
-            checklist.ACTION_ITEM_DETAILS, checklist.EXPECTED_START_TIME,
-            checklist.EXPECTED_COMP_TIME, checklist.SUSPENSION_STATUS,
-            TO_CHAR(mapping.BUSINESS_UNIT_ID) AS BUSINESS_UNIT_ID,
-            mapping.BUSINESS_UNIT_NAME,
-            TO_CHAR(mapping.LEGAL_ENTITY_ID) AS LEGAL_ENTITY_ID,
-            mapping.LEGAL_ENTITY_NAME,
-            TO_CHAR(mapping.LEDGER_ID) AS LEDGER_ID,
-            mapping.LEDGER_NAME, mapping.CURRENCY_CODE,
+            checklist.PROCESS_TYPE,
             NVL(progress.STATUS, 'Not started') AS STATUS,
             NVL(progress.OWNER_NAME,
-                NVL(checklist.ASSIGNED_USER,
-                    NVL(checklist.ACTION_BY, checklist.PROCESS_OWNER))) AS OWNER_NAME,
+                NVL(checklist.ACTION_BY, checklist.PROCESS_OWNER)) AS OWNER_NAME,
             CASE WHEN progress.NOTE_OVERRIDDEN = 'Y' THEN progress.NOTE
                  ELSE checklist.STEP_COMMENT END AS NOTE
        FROM XX_OPERATIONAL_CHECKLIST checklist
-       CROSS JOIN XX_BU_LE_LEDGER_MAPPING mapping
        LEFT JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS progress
          ON progress.CHECKLIST_ROW_ID = TO_CHAR(checklist.CHECKLIST_ROW_ID)
-        AND progress.BUSINESS_UNIT_ID = TO_CHAR(mapping.BUSINESS_UNIT_ID)
-      ORDER BY mapping.BUSINESS_UNIT_NAME, checklist.CHECKLIST_NO,
-               checklist.SUM_SEQ, checklist.CHECKLIST_ROW_ID`,
+        AND progress.BUSINESS_UNIT_ID = NVL(checklist.BUSINESS_UNIT, 'Unassigned')
+      ORDER BY checklist.BUSINESS_UNIT, checklist.LEGAL_ENTITY,
+               checklist.MODULE_NAME, checklist.CHECKLIST_ROW_ID`,
     [],
     { outFormat: oracledb.OUT_FORMAT_OBJECT }
   );
@@ -146,33 +109,22 @@ async function readTasks(connection) {
 
 async function readEntities(connection) {
   const result = await connection.execute(
-    `SELECT TO_CHAR(BUSINESS_UNIT_ID) AS BUSINESS_UNIT_ID,
-            BUSINESS_UNIT_NAME,
-            TO_CHAR(LEGAL_ENTITY_ID) AS LEGAL_ENTITY_ID,
-            LEGAL_ENTITY_NAME,
-            TO_CHAR(LEDGER_ID) AS LEDGER_ID,
-            LEDGER_NAME,
-            CURRENCY_CODE
-       FROM XX_BU_LE_LEDGER_MAPPING
+    `SELECT DISTINCT
+            NVL(BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT_NAME
+       FROM XX_OPERATIONAL_CHECKLIST
       ORDER BY BUSINESS_UNIT_NAME`,
     [],
     { outFormat: oracledb.OUT_FORMAT_OBJECT }
   );
   return result.rows.map(row => ({
-    id: row.BUSINESS_UNIT_ID,
-    name: row.BUSINESS_UNIT_NAME,
-    legalEntityId: row.LEGAL_ENTITY_ID,
-    legalEntityName: row.LEGAL_ENTITY_NAME,
-    ledgerId: row.LEDGER_ID,
-    ledgerName: row.LEDGER_NAME,
-    currency: row.CURRENCY_CODE
+    id: row.BUSINESS_UNIT_NAME,
+    name: row.BUSINESS_UNIT_NAME
   }));
 }
 
 function parseTaskId(id) {
-  const match = id.match(/^(\d+):(\d+)$/);
-  if (!match) throw new HttpError(400, 'Task ID must identify a checklist row and business unit.');
-  return { checklistId: match[1], businessUnitId: match[2] };
+  if (!/^\d+$/.test(id)) throw new HttpError(400, 'Task ID must identify a checklist row.');
+  return { checklistId: id };
 }
 
 async function readRequestBody(request) {
@@ -322,7 +274,7 @@ async function main() {
               throw new HttpError(400, `Row ${index + 1}: ${column} is required.`);
             }
           }
-          for (const column of source.numericIds) {
+          for (const column of source.numericIds || []) {
             if (typeof values[column] !== 'string' || !/^\d+$/.test(values[column].trim())) {
               throw new HttpError(400, `Row ${index + 1}: ${column} must contain digits only.`);
             }
@@ -371,7 +323,7 @@ async function main() {
 
       const taskMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
       if (request.method === 'PATCH' && taskMatch) {
-        const { checklistId, businessUnitId } = parseTaskId(decodeURIComponent(taskMatch[1]));
+        const { checklistId } = parseTaskId(decodeURIComponent(taskMatch[1]));
         const patch = await readRequestBody(request);
         if (!patch || typeof patch !== 'object' || Array.isArray(patch) ||
             Object.keys(patch).some(key => !['status', 'owner', 'note'].includes(key)) ||
@@ -387,25 +339,23 @@ async function main() {
         if (typeof patch.note !== 'string' || patch.note.length > 4000) {
           throw new HttpError(400, 'Task note must be a string of at most 4000 characters.');
         }
-        const progress = {
-          checklistId,
-          businessUnitId,
-          status: patch.status,
-          owner: patch.owner.trim(),
-          note: patch.note
-        };
         const connection = await pool.getConnection();
         try {
           const source = await connection.execute(
-            `SELECT 1
-               FROM XX_OPERATIONAL_CHECKLIST checklist
-               CROSS JOIN XX_BU_LE_LEDGER_MAPPING mapping
-              WHERE TO_CHAR(checklist.CHECKLIST_ROW_ID) = :checklistId
-                AND TO_CHAR(mapping.BUSINESS_UNIT_ID) = :businessUnitId`,
-            { checklistId, businessUnitId },
+            `SELECT NVL(BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT_ID
+               FROM XX_OPERATIONAL_CHECKLIST
+              WHERE TO_CHAR(CHECKLIST_ROW_ID) = :checklistId`,
+            { checklistId },
             { outFormat: oracledb.OUT_FORMAT_OBJECT }
           );
           if (source.rows.length === 0) throw new HttpError(404, 'Checklist task not found.');
+          const progress = {
+            checklistId,
+            businessUnitId: source.rows[0].BUSINESS_UNIT_ID,
+            status: patch.status,
+            owner: patch.owner.trim(),
+            note: patch.note
+          };
           await connection.execute(
             `MERGE INTO XX_OPERATIONAL_CHECKLIST_PROGRESS target
              USING (
@@ -430,26 +380,23 @@ async function main() {
           );
           const updated = await connection.execute(
             `SELECT TO_CHAR(checklist.CHECKLIST_ROW_ID) AS CHECKLIST_ROW_ID,
-                    TO_CHAR(mapping.BUSINESS_UNIT_ID) AS BUSINESS_UNIT_ID,
+                    NVL(checklist.BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT_ID,
                     NVL(progress.STATUS, 'Not started') AS STATUS,
                     NVL(progress.OWNER_NAME,
-                        NVL(checklist.ASSIGNED_USER,
-                            NVL(checklist.ACTION_BY, checklist.PROCESS_OWNER))) AS OWNER_NAME,
+                        NVL(checklist.ACTION_BY, checklist.PROCESS_OWNER)) AS OWNER_NAME,
                     CASE WHEN progress.NOTE_OVERRIDDEN = 'Y' THEN progress.NOTE
                          ELSE checklist.STEP_COMMENT END AS NOTE
                FROM XX_OPERATIONAL_CHECKLIST checklist
-               CROSS JOIN XX_BU_LE_LEDGER_MAPPING mapping
                LEFT JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS progress
                  ON progress.CHECKLIST_ROW_ID = TO_CHAR(checklist.CHECKLIST_ROW_ID)
-                AND progress.BUSINESS_UNIT_ID = TO_CHAR(mapping.BUSINESS_UNIT_ID)
-              WHERE TO_CHAR(checklist.CHECKLIST_ROW_ID) = :checklistId
-                AND TO_CHAR(mapping.BUSINESS_UNIT_ID) = :businessUnitId`,
-            { checklistId, businessUnitId },
+                AND progress.BUSINESS_UNIT_ID = NVL(checklist.BUSINESS_UNIT, 'Unassigned')
+              WHERE TO_CHAR(checklist.CHECKLIST_ROW_ID) = :checklistId`,
+            { checklistId },
             { outFormat: oracledb.OUT_FORMAT_OBJECT }
           );
           const task = updated.rows[0];
           sendJson(response, 200, {
-            id: `${task.CHECKLIST_ROW_ID}:${task.BUSINESS_UNIT_ID}`,
+            id: task.CHECKLIST_ROW_ID,
             status: task.STATUS,
             owner: task.OWNER_NAME,
             note: task.NOTE || ''

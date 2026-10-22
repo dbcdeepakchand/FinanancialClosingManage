@@ -12,14 +12,11 @@ const uploadTemplates = {
     label: 'Operational checklist',
     fileName: 'operational-checklist-template.csv',
     tableName: 'XX_OPERATIONAL_CHECKLIST',
-    required: 'CHECKLIST_ROW_ID, STEP_DESCRIPTION',
+    required: 'BUSINESS_UNIT, STEP_DESCRIPTION',
     columns: [
-      'CHECKLIST_ROW_ID', 'CHECKLIST_NO', 'SUM_SEQ', 'MODULE_NAME', 'PROCESS_OWNER',
-      'STEP_ID', 'PRE_REQUISITE_ID', 'PRE_REQUISITE_DESC', 'STEP_DESCRIPTION',
-      'STEP_COMMENT', 'ACTION_BY', 'WORKDAYS', 'TARGET_DATE', 'TPIT', 'TPIDL',
-      'TENITALYPS', 'BUSINESS_UNIT', 'USER_ROLE', 'ASSIGNED_USER', 'COMPLETION_CHECK',
-      'EXPECTED_OUTCOME', 'ACTION_TYPE', 'PROCESS_TYPE', 'NAVIGATION_PATH',
-      'ACTION_ITEM_DETAILS', 'EXPECTED_START_TIME', 'EXPECTED_COMP_TIME', 'SUSPENSION_STATUS'
+      'MODULE_NAME', 'BUSINESS_UNIT', 'LEGAL_ENTITY', 'PROCESS_OWNER',
+      'STEP_DESCRIPTION', 'STEP_COMMENT', 'ACTION_BY', 'PRE_REQUISITE_DESC',
+      'ACTION_TYPE', 'PROCESS_TYPE'
     ]
   },
   mapping: {
@@ -38,18 +35,9 @@ const navItems = [
   { id:'dashboard', label:'Dashboard', icon:LayoutDashboard },
   { id:'checklist', label:'Close checklist', icon:ListChecks },
   { id:'entities', label:'Business units', icon:Building2 },
-  { id:'calendar', label:'Close calendar', icon:CalendarDays },
+  { id:'calendar', label:'Checklist sequence', icon:CalendarDays },
   { id:'reports', label:'Reports & analytics', icon:ChartNoAxesCombined }
 ];
-
-function formatWorkdays(value) {
-  if (value === null || value === undefined || value === '') return 'Not set';
-  const days = Number(value);
-  if (!Number.isFinite(days)) return String(value);
-  if (days < 0) return `${Math.abs(days)} workdays before close`;
-  if (days > 0) return `${days} workdays after close`;
-  return 'Close day';
-}
 
 function parseCsv(text, expectedColumns) {
   const records = [];
@@ -212,7 +200,7 @@ export default function App() {
     (selectedEntity === 'ALL' || t.businessUnitId === selectedEntity) &&
     (statusFilter === 'All statuses' || t.status === statusFilter) &&
     (moduleFilter === 'All modules' || t.module === moduleFilter) &&
-    [t.title,t.stepId,t.module,t.owner,t.entity,t.legalEntityName,t.ledgerName]
+    [t.title,t.module,t.owner,t.entity,t.legalEntityName]
       .filter(Boolean).join(' ').toLowerCase().includes(search.toLowerCase())
   ),[applicable,selectedEntity,statusFilter,moduleFilter,search]);
 
@@ -231,7 +219,7 @@ export default function App() {
   const fullyClosed = entityStats.filter(e=>e.total>0 && e.done===e.total).length;
   const modules = [...new Set(applicable.map(t=>t.module))].sort();
   const checklistRows = [...new Map(applicable.map(task=>[task.checklistRowId,task])).values()]
-    .sort((a,b)=>Number(a.checklistNo)-Number(b.checklistNo) || Number(a.sequence)-Number(b.sequence));
+    .sort((a,b)=>Number(a.checklistRowId)-Number(b.checklistRowId));
 
   const updateTask = (id,patch) => {
     setDetailTask(prev=>prev && prev.id===id?{...prev,...patch}:prev);
@@ -314,9 +302,9 @@ export default function App() {
   };
 
   const exportCsv = () => {
-    const rows = [['Checklist row ID','Checklist no','Sequence','Step ID','Prerequisite ID','Module','Activity','Business unit ID','Business unit','Source business unit','Legal entity ID','Legal entity','Ledger ID','Ledger','Currency','Process owner','Assigned owner','Action by','Workdays','Target date','TPIT','TPIDL','TENITALYPS','User role','Action type','Process type','Navigation path','Action details','Expected start time','Expected completion time','Suspension status','Completion check','Expected outcome','Status','Comment']];
+    const rows = [['CHECKLIST_ROW_ID','MODULE_NAME','BUSINESS_UNIT','LEGAL_ENTITY','PROCESS_OWNER','STEP_DESCRIPTION','STEP_COMMENT','ACTION_BY','PRE_REQUISITE_DESC','ACTION_TYPE','PROCESS_TYPE','STATUS','ASSIGNED_USER','WORKFLOW_COMMENT']];
     visibleTasks.forEach(t=>{
-      rows.push([t.checklistRowId,t.checklistNo,t.sequence,t.stepId,t.prerequisiteId,t.module,t.title,t.businessUnitId,t.entity,t.entityScope,t.legalEntityId,t.legalEntityName,t.ledgerId,t.ledgerName,t.currency,t.processOwner,t.owner,t.actionBy,formatWorkdays(t.due),t.targetDate,t.tpit,t.tpidl,t.tenItalyPs,t.userRole,t.actionType,t.processType,t.navigationPath,t.actionDetails,t.expectedStartTime,t.expectedCompletionTime,t.suspensionStatus,t.completionCheck,t.expectedOutcome,t.status,t.note||'']);
+      rows.push([t.checklistRowId,t.moduleName,t.entity,t.legalEntityName,t.processOwner,t.title,t.stepComment,t.actionBy,t.prerequisiteDescription,t.actionType,t.processType,t.status,t.owner,t.note||'']);
     });
     const csv = rows.map(row=>row.map(v=>`"${String(v??'').replaceAll('"','""')}"`).join(',')).join('\n');
     const blob = new Blob([csv],{type:'text/csv;charset=utf-8;'});
@@ -374,48 +362,47 @@ export default function App() {
         {page==='dashboard' && <Dashboard
           completion={completion} completedCount={completedCount}
           inProgressCount={inProgressCount} blockedCount={blockedCount} pendingCount={pendingCount}
-          fullyClosed={fullyClosed} unscheduledCount={applicable.filter(t=>t.due===null||t.due===undefined||t.due==='').length} entityStats={entityStats}
+          fullyClosed={fullyClosed} moduleCount={modules.length} entityStats={entityStats}
           applicable={applicable} onGoChecklist={()=>setPage('checklist')} onSelectEntity={id=>{setSelectedEntity(id);setPage('checklist');}}
           onViewEntities={()=>setPage('entities')} onOpenTask={t=>setDetailTask(t)}
         />}
 
         {page==='checklist' && <section className="page-section">
-          <div className="page-heading"><div><div className="eyebrow">CLOSE EXECUTION</div><h1>Operational checklist</h1><p>Checklist activities expanded across the business units in the BU / ledger mapping.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export</button></div>
+          <div className="page-heading"><div><div className="eyebrow">CLOSE EXECUTION</div><h1>Operational checklist</h1><p>Checklist activities are assigned directly to the business unit and legal entity in each source row.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export</button></div>
           <div className="inline-summary"><div><span className="summary-dot green"/><strong>{completedCount}</strong><span>Complete</span></div><div><span className="summary-dot blue"/><strong>{inProgressCount}</strong><span>In progress</span></div><div><span className="summary-dot amber"/><strong>{pendingCount}</strong><span>Not started</span></div><div><span className="summary-dot red"/><strong>{blockedCount}</strong><span>Blocked</span></div></div>
           <div className="table-card">
             <div className="table-toolbar"><div className="search-box"><Search size={16}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search activities, owners, units..."/></div><div className="toolbar-filters"><select value={selectedEntity} onChange={e=>setSelectedEntity(e.target.value)}><option value="ALL">All business units</option>{entities.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select><select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option>All statuses</option><option>Not started</option><option>In progress</option><option>Blocked</option><option>Complete</option></select><select value={moduleFilter} onChange={e=>setModuleFilter(e.target.value)}><option>All modules</option>{modules.map(m=><option key={m}>{m}</option>)}</select></div></div>
-            <div className="table-scroll"><table><thead><tr><th>Activity</th><th>Business unit / legal entity</th><th>Process owner</th><th>Workdays</th><th>Status</th><th></th></tr></thead><tbody>
-              {visibleTasks.map(t=><tr key={t.id} onClick={()=>setDetailTask(t)} className="clickable-row"><td><div className="task-name">{t.status==='Complete'?<CheckCircle2 size={16} className="task-check done"/>:<Circle size={16} className="task-check"/>}<div><strong>{t.title}</strong><small>{t.stepId} · {t.module}</small></div></div></td><td><span className="entity-code">{t.entity}</span><span className="entity-short">{t.legalEntityName}</span></td><td><span className="owner-name"><span className="mini-avatar">{t.owner.split(' ').map(s=>s[0]).join('').slice(0,2)}</span>{t.owner}</span></td><td><span className="due-text">{formatWorkdays(t.due)}</span></td><td><StatusPill status={t.status}/></td><td><button className="row-more" onClick={e=>{e.stopPropagation();setDetailTask(t)}}><ChevronRight size={17}/></button></td></tr>)}
+            <div className="table-scroll"><table><thead><tr><th>Activity</th><th>Business unit / legal entity</th><th>Process owner</th><th>Action / process type</th><th>Status</th><th></th></tr></thead><tbody>
+              {visibleTasks.map(t=><tr key={t.id} onClick={()=>setDetailTask(t)} className="clickable-row"><td><div className="task-name">{t.status==='Complete'?<CheckCircle2 size={16} className="task-check done"/>:<Circle size={16} className="task-check"/>}<div><strong>{t.title}</strong><small>{t.module}</small></div></div></td><td><span className="entity-code">{t.entity}</span><span className="entity-short">{t.legalEntityName}</span></td><td><span className="owner-name"><span className="mini-avatar">{t.owner.split(' ').map(s=>s[0]).join('').slice(0,2)}</span>{t.owner}</span></td><td>{t.actionType || t.processType || '—'}</td><td><StatusPill status={t.status}/></td><td><button className="row-more" onClick={e=>{e.stopPropagation();setDetailTask(t)}}><ChevronRight size={17}/></button></td></tr>)}
               {visibleTasks.length===0&&<tr><td colSpan="6" className="empty-state">No tasks match your filters.</td></tr>}
             </tbody></table></div>
-            <div className="table-footer"><span>Showing <strong>{visibleTasks.length}</strong> of {applicable.length} checklist / business-unit instances</span><span>Source checklist rows: <strong>{new Set(applicable.map(t=>t.checklistRowId)).size}</strong></span></div>
+            <div className="table-footer"><span>Showing <strong>{visibleTasks.length}</strong> of {applicable.length} checklist rows</span><span>Source checklist rows: <strong>{new Set(applicable.map(t=>t.checklistRowId)).size}</strong></span></div>
           </div>
         </section>}
 
         {page==='entities' && <section className="page-section">
-          <div className="page-heading"><div><div className="eyebrow">BUSINESS UNIT OVERSIGHT</div><h1>Business units</h1><p>Mapped business units with their legal entities, ledgers and checklist completion.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export overview</button></div>
+          <div className="page-heading"><div><div className="eyebrow">BUSINESS UNIT OVERSIGHT</div><h1>Business units</h1><p>Business units and legal entities recorded in the checklist source rows.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export overview</button></div>
           <div className="entity-grid">{entityStats.map(e=><button key={e.id} className="entity-card" onClick={()=>{setSelectedEntity(e.id);setPage('checklist');}}>
-            <div className="entity-card-top"><div className="entity-symbol"><Building2 size={19}/></div><span className="entity-code">{e.currency}</span><ChevronRight size={16}/></div>
-            <h3>{e.name}</h3><p>{e.legalEntityName}</p><div className="entity-progress-label"><span>Close completion</span><strong>{e.pct}%</strong></div><Progress value={e.pct} color={e.pct===100?'green':'blue'}/><div className="entity-card-bottom"><span><CheckCircle2 size={14}/>{e.done} complete</span><span><Clock3 size={14}/>{e.pending+e.inProgress+e.blocked} open</span></div><div className="controller-line"><Building2 size={14}/> {e.ledgerName} · {e.currency}</div>
+            <div className="entity-card-top"><div className="entity-symbol"><Building2 size={19}/></div><ChevronRight size={16}/></div>
+            <h3>{e.name}</h3><div className="entity-progress-label"><span>Close completion</span><strong>{e.pct}%</strong></div><Progress value={e.pct} color={e.pct===100?'green':'blue'}/><div className="entity-card-bottom"><span><CheckCircle2 size={14}/>{e.done} complete</span><span><Clock3 size={14}/>{e.pending+e.inProgress+e.blocked} open</span></div>
           </button>)}</div>
         </section>}
 
         {page==='calendar' && <section className="page-section">
-          <div className="page-heading"><div><div className="eyebrow">SOURCE SCHEDULE</div><h1>Checklist timing</h1><p>Schedule details are taken directly from the operational checklist extract.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export schedule</button></div>
-          <div className="calendar-banner"><div className="calendar-banner-icon"><CalendarRange size={23}/></div><div><strong>{checklistRows.length} operational checklist steps</strong><p>Workday offsets and expected run times reflect the source checklist. Blank WORKDAYS values are shown as not set.</p></div></div>
+          <div className="page-heading"><div><div className="eyebrow">SOURCE CHECKLIST</div><h1>Checklist sequence</h1><p>Operational steps grouped by module, business unit and legal entity.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export checklist</button></div>
+          <div className="calendar-banner"><div className="calendar-banner-icon"><CalendarRange size={23}/></div><div><strong>{checklistRows.length} operational checklist steps</strong><p>Checklist activities are grouped by module and business unit.</p></div></div>
           <div className="timeline">{checklistRows.map((task,index)=><div className="timeline-item" key={task.checklistRowId}>
             <div className={`timeline-marker ${index===0?'current':''}`}>{index+1}</div>
-            <div className="timeline-content"><div className="timeline-top"><span className="timeline-day">{formatWorkdays(task.due)}</span><span className="module-chip">{task.module}</span></div>
-              <h3>{task.stepId} · {task.title}</h3><p>{task.note || task.actionDetails || task.navigationPath || 'No additional schedule details in the source checklist.'}</p>
-              {(task.expectedStartTime || task.expectedCompletionTime) && <p>Expected: {[task.expectedStartTime,task.expectedCompletionTime].filter(Boolean).join(' – ')}</p>}
+            <div className="timeline-content"><div className="timeline-top"><span className="timeline-day">{task.entity}</span><span className="module-chip">{task.module}</span></div>
+              <h3>{task.title}</h3><p>{task.actionType || task.processType || task.note || 'No additional details in the source checklist.'}</p>
             </div>
           </div>)}</div>
         </section>}
 
         {page==='reports' && <section className="page-section">
           <div className="page-heading"><div><div className="eyebrow">PERFORMANCE & INSIGHTS</div><h1>Reports & analytics</h1><p>Review progress, workload and close execution risks.</p></div><button className="btn primary" onClick={exportCsv}><Download size={16}/> Export report</button></div>
-          <div className="stats-grid"><StatCard label="Overall completion" value={`${completion}%`} sub={`${completedCount} of ${applicable.length} activities`} icon={ChartNoAxesCombined} tone="blue"/><StatCard label="Business units fully closed" value={`${fullyClosed} / ${entities.length}`} sub="All mapped checklist rows complete" icon={ShieldCheck} tone="green"/><StatCard label="Activities without timing" value={applicable.filter(t=>t.due===null||t.due===undefined||t.due==='').length} sub="WORKDAYS not set in source" icon={CalendarRange} tone="amber"/><StatCard label="Blocked tasks" value={blockedCount} sub="Requires intervention" icon={CircleAlert} tone="red"/></div>
-          <div className="reports-grid"><div className="panel"><div className="panel-heading"><div><h2>Business unit completion</h2><p>Completion rate by mapped BU</p></div><span className="panel-icon"><ChartNoAxesCombined size={18}/></span></div><div className="bar-chart">{entityStats.map(e=><div className="bar-row" key={e.id}><span title={e.name}>{e.name}</span><div className="bar-bg"><div className="bar-fill" style={{width:`${e.pct}%`}}/></div><strong>{e.pct}%</strong></div>)}</div></div>
+          <div className="stats-grid"><StatCard label="Overall completion" value={`${completion}%`} sub={`${completedCount} of ${applicable.length} activities`} icon={ChartNoAxesCombined} tone="blue"/><StatCard label="Business units fully closed" value={`${fullyClosed} / ${entities.length}`} sub="All source business-unit/legal-entity rows complete" icon={ShieldCheck} tone="green"/><StatCard label="Checklist modules" value={modules.length} sub="Distinct modules in the source rows" icon={CalendarRange} tone="amber"/><StatCard label="Blocked tasks" value={blockedCount} sub="Requires intervention" icon={CircleAlert} tone="red"/></div>
+          <div className="reports-grid"><div className="panel"><div className="panel-heading"><div><h2>Business unit completion</h2><p>Completion rate by source business unit</p></div><span className="panel-icon"><ChartNoAxesCombined size={18}/></span></div><div className="bar-chart">{entityStats.map(e=><div className="bar-row" key={e.id}><span title={e.name}>{e.name}</span><div className="bar-bg"><div className="bar-fill" style={{width:`${e.pct}%`}}/></div><strong>{e.pct}%</strong></div>)}</div></div>
           <div className="panel"><div className="panel-heading"><div><h2>Task status mix</h2><p>Current operational checklist instances</p></div><span className="panel-icon"><Activity size={18}/></span></div><div className="status-breakdown"><div className="donut-wrap"><div className="donut" style={{background:`conic-gradient(#1b9875 0 ${completedCount/Math.max(applicable.length,1)*100}%, #4b88d2 ${completedCount/Math.max(applicable.length,1)*100}% ${(completedCount+inProgressCount)/Math.max(applicable.length,1)*100}%, #d99a2b ${(completedCount+inProgressCount)/Math.max(applicable.length,1)*100}% ${(completedCount+inProgressCount+pendingCount)/Math.max(applicable.length,1)*100}%, #d75d5d ${(completedCount+inProgressCount+pendingCount)/Math.max(applicable.length,1)*100}% 100%)`}}><div className="donut-hole"><strong>{completion}%</strong><span>Complete</span></div></div></div><div className="legend">{[['Complete',completedCount,'green'],['In progress',inProgressCount,'blue'],['Not started',pendingCount,'amber'],['Blocked',blockedCount,'red']].map(([label,count,color])=><div className="legend-item" key={label}><span className={`legend-dot ${color}`}/><span>{label}</span><strong>{count}</strong></div>)}</div></div></div></div>
           <div className="panel attention-panel"><div className="panel-heading"><div><h2>Blocked activities</h2><p>Activities currently marked blocked</p></div><button className="text-btn" onClick={()=>setPage('checklist')}>View checklist <ArrowUpRight size={14}/></button></div><div className="attention-list">{applicable.filter(t=>t.status==='Blocked').slice(0,7).map(t=><button key={t.id} className="attention-item" onClick={()=>setDetailTask(t)}><span className="attention-alert red"><AlertTriangle size={16}/></span><span className="attention-copy"><strong>{t.title}</strong><small>{t.entity} · {t.owner}</small></span><StatusPill status={t.status}/><ChevronRight size={16}/></button>)}</div></div>
         </section>}
@@ -443,29 +430,17 @@ export default function App() {
       <div className="drawer-body">
         {apiError && <p className="form-error" role="alert">{apiError}</p>}
         <span className="module-chip">{detailTask.module}</span><h3 className="drawer-task-title">{detailTask.title}</h3><div className="drawer-status-row"><StatusPill status={detailTask.status}/></div>
-        <p className="field-label">Step {detailTask.stepId} · Checklist {detailTask.checklistNo}</p>
         <label className="field-label">Business unit</label><p>{detailTask.entity}</p>
-        <label className="field-label">Legal entity / ledger</label><p>{detailTask.legalEntityName} · {detailTask.ledgerName} ({detailTask.currency})</p>
-        <label className="field-label">Checklist timing</label><p>{formatWorkdays(detailTask.due)}</p>
+        {detailTask.legalEntityName && <><label className="field-label">Legal entity</label><p>{detailTask.legalEntityName}</p></>}
         {detailTask.processOwner && <><label className="field-label">Source process owner</label><p>{detailTask.processOwner}</p></>}
         {detailTask.actionBy && <><label className="field-label">Action by</label><p>{detailTask.actionBy}</p></>}
-        {detailTask.targetDate && <><label className="field-label">Target date</label><p>{detailTask.targetDate}</p></>}
-        {detailTask.entityScope && <><label className="field-label">Source business unit</label><p>{detailTask.entityScope}</p></>}
-        {[['TPIT',detailTask.tpit],['TPIDL',detailTask.tpidl],['TENITALYPS',detailTask.tenItalyPs]].some(([,value])=>value) && <><label className="field-label">Business unit scope flags</label><p>{[['TPIT',detailTask.tpit],['TPIDL',detailTask.tpidl],['TENITALYPS',detailTask.tenItalyPs]].filter(([,value])=>value).map(([label,value])=>`${label}: ${value}`).join(' · ')}</p></>}
-        {detailTask.userRole && <><label className="field-label">User role</label><p>{detailTask.userRole}</p></>}
         <label className="field-label">Task status</label><select className="field-control" value={detailTask.status} onChange={e=>updateTask(detailTask.id,{status:e.target.value})}><option>Not started</option><option>In progress</option><option>Blocked</option><option>Complete</option></select>
         <label className="field-label">Owner / team</label><input className="field-control" value={detailTask.owner} onChange={e=>updateTask(detailTask.id,{owner:e.target.value})}/>
         <label className="field-label">Comments / blockers</label><textarea className="field-control textarea" rows="4" placeholder="Add progress notes, blockers or handover comments..." value={detailTask.note||''} onChange={e=>updateTask(detailTask.id,{note:e.target.value})}/>
-        {detailTask.prerequisiteId && <><label className="field-label">Prerequisite</label><p>{detailTask.prerequisiteId}{detailTask.prerequisiteDescription ? ` · ${detailTask.prerequisiteDescription}` : ''}</p></>}
+        {detailTask.prerequisiteDescription && <><label className="field-label">Prerequisite description</label><p>{detailTask.prerequisiteDescription}</p></>}
         {detailTask.actionType && <><label className="field-label">Action type</label><p>{detailTask.actionType}</p></>}
         {detailTask.processType && <><label className="field-label">Process type</label><p>{detailTask.processType}</p></>}
-        {detailTask.navigationPath && <><label className="field-label">Navigation path</label><p>{detailTask.navigationPath}</p></>}
-        {detailTask.actionDetails && <><label className="field-label">Action details</label><p>{detailTask.actionDetails}</p></>}
-        {detailTask.suspensionStatus && <><label className="field-label">Suspension status</label><p>{detailTask.suspensionStatus}</p></>}
-        {(detailTask.expectedStartTime || detailTask.expectedCompletionTime) && <><label className="field-label">Expected run time</label><p>{[detailTask.expectedStartTime,detailTask.expectedCompletionTime].filter(Boolean).join(' – ')}</p></>}
-        {detailTask.completionCheck && <><label className="field-label">Completion check</label><p>{detailTask.completionCheck}</p></>}
-        {detailTask.expectedOutcome && <><label className="field-label">Expected outcome</label><p>{detailTask.expectedOutcome}</p></>}
-        <div className="drawer-note"><ShieldCheck size={16}/><span>Workflow edits are stored separately from the source operational checklist and BU/ledger mapping.</span></div>
+        <div className="drawer-note"><ShieldCheck size={16}/><span>Workflow status, owner and comments are stored separately from the source checklist.</span></div>
       </div>
       <div className="drawer-footer"><button className="btn secondary" onClick={()=>setDetailTask(null)}>Cancel</button><button className="btn primary" onClick={saveTask} disabled={saving}><Check size={16}/>{saving?'Saving…':'Save changes'}</button></div>
     </div></div>}
@@ -475,37 +450,37 @@ export default function App() {
 }
 
 function Dashboard(props) {
-  const {completion,completedCount,inProgressCount,blockedCount,pendingCount,fullyClosed,unscheduledCount,entityStats,applicable,onGoChecklist,onSelectEntity,onViewEntities,onOpenTask}=props;
+  const {completion,completedCount,inProgressCount,blockedCount,pendingCount,fullyClosed,moduleCount,entityStats,applicable,onGoChecklist,onSelectEntity,onViewEntities,onOpenTask}=props;
   const openTasks=applicable.filter(t=>t.status!=='Complete');
   const attention=applicable.filter(t=>t.status==='Blocked').slice(0,5);
   const schedule=[...new Map(applicable.map(task=>[task.checklistRowId,task])).values()]
-    .sort((a,b)=>Number(a.due??Infinity)-Number(b.due??Infinity) || Number(a.checklistNo)-Number(b.checklistNo))
+    .sort((a,b)=>Number(a.checklistRowId)-Number(b.checklistRowId))
     .slice(0,5);
   return <section className="page-section">
-    <div className="welcome-row"><div><div className="eyebrow">GROUP FINANCE / CLOSE MANAGEMENT</div><h1>Operational checklist overview</h1><p>Activity status across <strong>{entityStats.length} mapped business units</strong>.</p></div><div className="welcome-actions"><span className="period-badge"><FileSpreadsheet size={15}/> Oracle data</span><button className="btn primary" onClick={onGoChecklist}><ListChecks size={16}/> Open checklist</button></div></div>
-    <div className="callout"><div className="callout-icon"><Sparkles size={19}/></div><div className="callout-copy"><strong>Checklist overview</strong><p>{completion}% of {applicable.length} checklist / business-unit activities are complete across {entityStats.length} mapped business units. <b>{blockedCount} activities</b> are blocked and need review.</p></div><button className="callout-link" onClick={onGoChecklist}>Review tasks <ArrowUpRight size={14}/></button></div>
+    <div className="welcome-row"><div><div className="eyebrow">GROUP FINANCE / CLOSE MANAGEMENT</div><h1>Operational checklist overview</h1><p>Activity status across <strong>{entityStats.length} business unit / legal entity combinations</strong>.</p></div><div className="welcome-actions"><span className="period-badge"><FileSpreadsheet size={15}/> Oracle data</span><button className="btn primary" onClick={onGoChecklist}><ListChecks size={16}/> Open checklist</button></div></div>
+    <div className="callout"><div className="callout-icon"><Sparkles size={19}/></div><div className="callout-copy"><strong>Checklist overview</strong><p>{completion}% of {applicable.length} checklist activities are complete across {entityStats.length} business unit / legal entity combinations. <b>{blockedCount} activities</b> are blocked and need review.</p></div><button className="callout-link" onClick={onGoChecklist}>Review tasks <ArrowUpRight size={14}/></button></div>
     <div className="stats-grid">
       <StatCard label="Checklist completion" value={`${completion}%`} sub={`${completedCount} of ${applicable.length} activities complete`} icon={ChartNoAxesCombined} tone="blue"/>
-      <StatCard label="Business units fully closed" value={`${fullyClosed} / ${entityStats.length}`} sub="All mapped checklist rows complete" icon={ShieldCheck} tone="green"/>
+      <StatCard label="Business units fully closed" value={`${fullyClosed} / ${entityStats.length}`} sub="All source checklist rows complete" icon={ShieldCheck} tone="green"/>
       <StatCard label="Open activities" value={openTasks.length.toLocaleString()} sub={`${inProgressCount} currently in progress`} icon={Clock3} tone="amber"/>
-      <StatCard label="Activities without timing" value={unscheduledCount} sub="WORKDAYS not set in source" icon={AlertTriangle} tone="red"/>
+      <StatCard label="Checklist modules" value={moduleCount} sub="Distinct modules in the source rows" icon={AlertTriangle} tone="red"/>
     </div>
     <div className="dashboard-grid">
       <div className="panel entity-overview">
-        <div className="panel-heading"><div><h2>Business unit overview</h2><p>Close progress by mapped BU</p></div><button className="text-btn" onClick={onViewEntities}>View all units <ArrowUpRight size={14}/></button></div>
+        <div className="panel-heading"><div><h2>Business unit overview</h2><p>Close progress by source BU / legal entity</p></div><button className="text-btn" onClick={onViewEntities}>View all units <ArrowUpRight size={14}/></button></div>
         <div className="entity-table"><div className="entity-table-head"><span>BUSINESS UNIT</span><span>PROGRESS</span><span>STATUS</span></div>
-          {entityStats.slice(0,7).map(e=><button className="entity-table-row" key={e.id} onClick={()=>onSelectEntity(e.id)}><div className="entity-cell"><div className="entity-mini-icon"><Building2 size={16}/></div><div><strong>{e.name}</strong><small>{e.legalEntityName}</small></div></div><div className="entity-progress-cell"><div className="entity-progress-text"><strong>{e.pct}%</strong><small>{e.done}/{e.total} tasks</small></div><Progress value={e.pct} color={e.pct===100?'green':'blue'}/></div><div className="entity-status-cell">{e.pct===100?<StatusPill status="Complete"/>:e.blocked>0?<StatusPill status="Blocked"/>:<StatusPill status={e.inProgress>0?'In progress':'Not started'}/>}</div></button>)}
+          {entityStats.slice(0,7).map(e=><button className="entity-table-row" key={e.id} onClick={()=>onSelectEntity(e.id)}><div className="entity-cell"><div className="entity-mini-icon"><Building2 size={16}/></div><div><strong>{e.name}</strong><small>Business unit</small></div></div><div className="entity-progress-cell"><div className="entity-progress-text"><strong>{e.pct}%</strong><small>{e.done}/{e.total} tasks</small></div><Progress value={e.pct} color={e.pct===100?'green':'blue'}/></div><div className="entity-status-cell">{e.pct===100?<StatusPill status="Complete"/>:e.blocked>0?<StatusPill status="Blocked"/>:<StatusPill status={e.inProgress>0?'In progress':'Not started'}/>}</div></button>)}
         </div><button className="panel-bottom-link" onClick={onViewEntities}>View all {entityStats.length} business units <ChevronRight size={15}/></button>
       </div>
       <div className="panel attention-panel">
         <div className="panel-heading"><div><h2>Blocked activities</h2><p>Activities currently marked blocked</p></div><span className="attention-count">{blockedCount}</span></div>
-        {attention.length===0?<div className="no-attention"><CheckCircle2 size={27}/><strong>No blocked activities</strong><p>There are no blocked activities in the current checklist data.</p></div>:<div className="attention-list">{attention.map(t=><button className="attention-item" key={t.id} onClick={()=>onOpenTask(t)}><span className="attention-alert red"><AlertTriangle size={16}/></span><span className="attention-copy"><strong>{t.title}</strong><small>{t.entity} · {formatWorkdays(t.due)} · {t.owner}</small></span><ChevronRight size={16}/></button>)}</div>}
+        {attention.length===0?<div className="no-attention"><CheckCircle2 size={27}/><strong>No blocked activities</strong><p>There are no blocked activities in the current checklist data.</p></div>:<div className="attention-list">{attention.map(t=><button className="attention-item" key={t.id} onClick={()=>onOpenTask(t)}><span className="attention-alert red"><AlertTriangle size={16}/></span><span className="attention-copy"><strong>{t.title}</strong><small>{t.entity} · {t.owner}</small></span><ChevronRight size={16}/></button>)}</div>}
         <button className="panel-bottom-link" onClick={onGoChecklist}>View all open activities <ChevronRight size={15}/></button>
       </div>
     </div>
     <div className="bottom-grid">
       <div className="panel"><div className="panel-heading"><div><h2>Close progress</h2><p>Overall activity status</p></div><span className="panel-icon"><Activity size={18}/></span></div><div className="big-progress"><div className="big-progress-value">{completion}%</div><div className="big-progress-copy"><strong>Activities completed</strong><span>{completedCount} completed out of {applicable.length} tasks</span></div></div><Progress value={completion} color="green"/><div className="status-metrics"><div><span className="legend-dot green"/><span>Complete</span><strong>{completedCount}</strong></div><div><span className="legend-dot blue"/><span>In progress</span><strong>{inProgressCount}</strong></div><div><span className="legend-dot amber"/><span>Not started</span><strong>{pendingCount}</strong></div><div><span className="legend-dot red"/><span>Blocked</span><strong>{blockedCount}</strong></div></div></div>
-      <div className="panel"><div className="panel-heading"><div><h2>Source checklist schedule</h2><p>WORKDAYS and steps from Oracle</p></div><span className="panel-icon"><CalendarDays size={18}/></span></div><div className="milestone-list">{schedule.map((task,index)=><div className="milestone" key={task.checklistRowId}><div className={`milestone-check ${task.status==='Complete'?'done':''}`}>{task.status==='Complete'?<Check size={13}/>:index+1}</div><div className="milestone-copy"><strong>{task.stepId} · {task.title}</strong><small>{task.module} · {task.status}</small></div><span className="milestone-day">{formatWorkdays(task.due)}</span></div>)}</div></div>
+      <div className="panel"><div className="panel-heading"><div><h2>Source checklist</h2><p>Activities recorded in Oracle</p></div><span className="panel-icon"><CalendarDays size={18}/></span></div><div className="milestone-list">{schedule.map((task,index)=><div className="milestone" key={task.checklistRowId}><div className={`milestone-check ${task.status==='Complete'?'done':''}`}>{task.status==='Complete'?<Check size={13}/>:index+1}</div><div className="milestone-copy"><strong>{task.title}</strong><small>{task.module} · {task.status}</small></div><span className="milestone-day">{task.entity}</span></div>)}</div></div>
     </div>
   </section>;
 }
