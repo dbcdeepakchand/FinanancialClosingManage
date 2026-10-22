@@ -2,10 +2,37 @@ import React, { useMemo, useState, useEffect } from 'react';
 import {
   LayoutDashboard, ListChecks, Building2, CalendarDays, ChartNoAxesCombined,
   Bell, Search, ChevronRight, CheckCircle2, Circle, Clock3, AlertTriangle,
-  ArrowUpRight, Download, MoreHorizontal, FileSpreadsheet, CircleHelp,
+  ArrowUpRight, Download, Upload, MoreHorizontal, FileSpreadsheet, CircleHelp,
   PanelLeftClose, Check, X, ShieldCheck, Sparkles, CalendarRange, Activity,
   CircleAlert, Menu
 } from 'lucide-react';
+
+const uploadTemplates = {
+  checklist: {
+    label: 'Operational checklist',
+    fileName: 'operational-checklist-template.csv',
+    tableName: 'XX_OPERATIONAL_CHECKLIST',
+    required: 'CHECKLIST_ROW_ID, STEP_DESCRIPTION',
+    columns: [
+      'CHECKLIST_ROW_ID', 'CHECKLIST_NO', 'SUM_SEQ', 'MODULE_NAME', 'PROCESS_OWNER',
+      'STEP_ID', 'PRE_REQUISITE_ID', 'PRE_REQUISITE_DESC', 'STEP_DESCRIPTION',
+      'STEP_COMMENT', 'ACTION_BY', 'WORKDAYS', 'TARGET_DATE', 'TPIT', 'TPIDL',
+      'TENITALYPS', 'BUSINESS_UNIT', 'USER_ROLE', 'ASSIGNED_USER', 'COMPLETION_CHECK',
+      'EXPECTED_OUTCOME', 'ACTION_TYPE', 'PROCESS_TYPE', 'NAVIGATION_PATH',
+      'ACTION_ITEM_DETAILS', 'EXPECTED_START_TIME', 'EXPECTED_COMP_TIME', 'SUSPENSION_STATUS'
+    ]
+  },
+  mapping: {
+    label: 'Business unit / ledger map',
+    fileName: 'business-unit-ledger-template.csv',
+    tableName: 'XX_BU_LE_LEDGER_MAPPING',
+    required: 'BUSINESS_UNIT_ID, BUSINESS_UNIT_NAME, LEGAL_ENTITY_ID, LEGAL_ENTITY_NAME, LEDGER_ID, LEDGER_NAME',
+    columns: [
+      'BUSINESS_UNIT_ID', 'BUSINESS_UNIT_NAME', 'LEGAL_ENTITY_ID', 'LEGAL_ENTITY_NAME',
+      'LEDGER_ID', 'LEDGER_NAME', 'CURRENCY_CODE'
+    ]
+  }
+};
 
 const navItems = [
   { id:'dashboard', label:'Dashboard', icon:LayoutDashboard },
@@ -22,6 +49,63 @@ function formatWorkdays(value) {
   if (days < 0) return `${Math.abs(days)} workdays before close`;
   if (days > 0) return `${days} workdays after close`;
   return 'Close day';
+}
+
+function parseCsv(text, expectedColumns) {
+  const records = [];
+  let row = [];
+  let value = '';
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else if (character === '"') {
+        quoted = false;
+      } else {
+        value += character;
+      }
+    } else if (character === '"' && value.length === 0) {
+      quoted = true;
+    } else if (character === ',') {
+      row.push(value);
+      value = '';
+    } else if (character === '\n' || character === '\r') {
+      if (character === '\r' && text[index + 1] === '\n') index += 1;
+      row.push(value);
+      if (row.some(cell => cell.trim() !== '')) records.push(row);
+      row = [];
+      value = '';
+    } else {
+      value += character;
+    }
+  }
+  if (quoted) throw new Error('The CSV has an unclosed quoted field.');
+  row.push(value);
+  if (row.some(cell => cell.trim() !== '')) records.push(row);
+  if (records.length === 0) throw new Error('The CSV is empty.');
+
+  const headers = records[0].map((header, index) =>
+    (index === 0 ? header.replace(/^\uFEFF/, '') : header).trim()
+  );
+  if (headers.length !== expectedColumns.length ||
+      new Set(headers).size !== expectedColumns.length ||
+      expectedColumns.some(column => !headers.includes(column))) {
+    throw new Error('The header row does not match the selected data-source template.');
+  }
+
+  const rows = records.slice(1).map((cells, index) => {
+    if (cells.length !== headers.length) {
+      throw new Error(`Row ${index + 2} has ${cells.length} columns; expected ${headers.length}.`);
+    }
+    return Object.fromEntries(headers.map((header, columnIndex) => [header, cells[columnIndex].trim()]));
+  });
+  if (rows.length === 0) throw new Error('Add at least one data row below the template headers.');
+  if (rows.length > 5000) throw new Error('Upload is limited to 5,000 rows at a time.');
+  return rows;
 }
 
 async function apiRequest(path, options = {}) {
@@ -91,6 +175,11 @@ export default function App() {
   const [toast,setToast] = useState('');
   const [mobileNav,setMobileNav] = useState(false);
   const [detailTask,setDetailTask] = useState(null);
+  const [dataSource,setDataSource] = useState('checklist');
+  const [uploadRows,setUploadRows] = useState([]);
+  const [uploadFileName,setUploadFileName] = useState('');
+  const [uploadError,setUploadError] = useState('');
+  const [uploading,setUploading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -170,6 +259,60 @@ export default function App() {
     }
   };
 
+  const downloadUploadTemplate = () => {
+    const template = uploadTemplates[dataSource];
+    const csv = template.columns.map(value => `"${value}"`).join(',');
+    const url = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8;'}));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = template.fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const selectUploadFile = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    setUploadRows([]);
+    setUploadFileName('');
+    setUploadError('');
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+      setUploadError('Choose a CSV file created from the supported template.');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setUploadError('The CSV file must be 5 MB or smaller.');
+      return;
+    }
+    try {
+      const rows = parseCsv(await file.text(), uploadTemplates[dataSource].columns);
+      setUploadRows(rows);
+      setUploadFileName(file.name);
+    } catch (error) {
+      setUploadError(error.message);
+    }
+  };
+
+  const submitUpload = async () => {
+    setUploading(true);
+    setUploadError('');
+    try {
+      const result = await apiRequest(`/imports/${dataSource}`, {
+        method: 'POST',
+        body: JSON.stringify({rows: uploadRows})
+      });
+      setUploadRows([]);
+      setUploadFileName('');
+      setToast(`${result.inserted} rows inserted into Oracle.`);
+      setReloadCount(count => count + 1);
+    } catch (error) {
+      setUploadError(`Upload failed: ${error.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const exportCsv = () => {
     const rows = [['Checklist row ID','Checklist no','Sequence','Step ID','Prerequisite ID','Module','Activity','Business unit ID','Business unit','Source business unit','Legal entity ID','Legal entity','Ledger ID','Ledger','Currency','Process owner','Assigned owner','Action by','Workdays','Target date','TPIT','TPIDL','TENITALYPS','User role','Action type','Process type','Navigation path','Action details','Expected start time','Expected completion time','Suspension status','Completion check','Expected outcome','Status','Comment']];
     visibleTasks.forEach(t=>{
@@ -182,7 +325,7 @@ export default function App() {
     setToast('Checklist exported to CSV');
   };
 
-  const pageTitle = navItems.find(n=>n.id===page)?.label || 'Dashboard';
+  const pageTitle = page === 'dataSource' ? 'Data source' : navItems.find(n=>n.id===page)?.label || 'Dashboard';
 
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav?'mobile-open':''}`}>
@@ -199,8 +342,9 @@ export default function App() {
       </nav>
       <div className="sidebar-section">
         <div className="sidebar-section-head"><span>DATA SOURCE</span><FileSpreadsheet size={14}/></div>
-        <div className="period-option selected"><span className="period-radio"/><span>Operational checklist</span></div>
-        <div className="period-option"><span className="period-radio"/><span>Business unit / ledger map</span></div>
+        {Object.entries(uploadTemplates).map(([key,template])=><button key={key} className={`period-option ${page==='dataSource'&&dataSource===key?'selected':''}`} onClick={()=>{setDataSource(key);setPage('dataSource');setUploadRows([]);setUploadFileName('');setUploadError('');setMobileNav(false);}}>
+          <span className="period-radio"/><span>{template.label}</span>
+        </button>)}
       </div>
       <div className="sidebar-spacer"/>
       <div className="sidebar-help">
@@ -274,6 +418,21 @@ export default function App() {
           <div className="reports-grid"><div className="panel"><div className="panel-heading"><div><h2>Business unit completion</h2><p>Completion rate by mapped BU</p></div><span className="panel-icon"><ChartNoAxesCombined size={18}/></span></div><div className="bar-chart">{entityStats.map(e=><div className="bar-row" key={e.id}><span title={e.name}>{e.name}</span><div className="bar-bg"><div className="bar-fill" style={{width:`${e.pct}%`}}/></div><strong>{e.pct}%</strong></div>)}</div></div>
           <div className="panel"><div className="panel-heading"><div><h2>Task status mix</h2><p>Current operational checklist instances</p></div><span className="panel-icon"><Activity size={18}/></span></div><div className="status-breakdown"><div className="donut-wrap"><div className="donut" style={{background:`conic-gradient(#1b9875 0 ${completedCount/Math.max(applicable.length,1)*100}%, #4b88d2 ${completedCount/Math.max(applicable.length,1)*100}% ${(completedCount+inProgressCount)/Math.max(applicable.length,1)*100}%, #d99a2b ${(completedCount+inProgressCount)/Math.max(applicable.length,1)*100}% ${(completedCount+inProgressCount+pendingCount)/Math.max(applicable.length,1)*100}%, #d75d5d ${(completedCount+inProgressCount+pendingCount)/Math.max(applicable.length,1)*100}% 100%)`}}><div className="donut-hole"><strong>{completion}%</strong><span>Complete</span></div></div></div><div className="legend">{[['Complete',completedCount,'green'],['In progress',inProgressCount,'blue'],['Not started',pendingCount,'amber'],['Blocked',blockedCount,'red']].map(([label,count,color])=><div className="legend-item" key={label}><span className={`legend-dot ${color}`}/><span>{label}</span><strong>{count}</strong></div>)}</div></div></div></div>
           <div className="panel attention-panel"><div className="panel-heading"><div><h2>Blocked activities</h2><p>Activities currently marked blocked</p></div><button className="text-btn" onClick={()=>setPage('checklist')}>View checklist <ArrowUpRight size={14}/></button></div><div className="attention-list">{applicable.filter(t=>t.status==='Blocked').slice(0,7).map(t=><button key={t.id} className="attention-item" onClick={()=>setDetailTask(t)}><span className="attention-alert red"><AlertTriangle size={16}/></span><span className="attention-copy"><strong>{t.title}</strong><small>{t.entity} · {t.owner}</small></span><StatusPill status={t.status}/><ChevronRight size={16}/></button>)}</div></div>
+        </section>}
+
+        {page==='dataSource' && <section className="page-section">
+          <div className="page-heading"><div><div className="eyebrow">ORACLE SOURCE DATA</div><h1>{uploadTemplates[dataSource].label}</h1><p>Upload a CSV to insert source records directly into the Oracle table used by the application.</p></div><button className="btn secondary" onClick={downloadUploadTemplate}><Download size={16}/> Download template</button></div>
+          <div className="upload-card">
+            <div className="upload-card-icon"><FileSpreadsheet size={21}/></div>
+            <div className="upload-card-copy"><h2>Upload source data</h2><p>Oracle table: <code>{uploadTemplates[dataSource].tableName}</code></p><p>Use the downloaded CSV template and keep its column headers unchanged. Required fields: {uploadTemplates[dataSource].required}. Empty cells are imported as null.</p></div>
+            <div className="upload-controls">
+              <label className="btn secondary upload-file-label"><Upload size={16}/> Choose CSV<input type="file" accept=".csv,text/csv" onChange={selectUploadFile}/></label>
+              <button className="btn primary" onClick={submitUpload} disabled={!uploadRows.length||uploading}><Upload size={16}/>{uploading?'Uploading…':`Insert ${uploadRows.length||''} rows`}</button>
+            </div>
+            <p className="upload-guidance">CSV only · Up to 5,000 rows and 5 MB per upload. Uploads append rows; existing records are not replaced. Duplicate keys or invalid Oracle values reject the entire upload.</p>
+            {uploadFileName && <div className="upload-file-status"><CheckCircle2 size={16}/><span><strong>{uploadFileName}</strong> · {uploadRows.length} rows ready to insert</span></div>}
+            {uploadError && <p className="form-error upload-error" role="alert">{uploadError}</p>}
+          </div>
         </section>}
       </div>
       <footer className="app-footer"><span>CloseControl <span className="footer-dot">•</span> Finance Close & Project Accounting Control Tower</span></footer>

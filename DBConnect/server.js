@@ -16,8 +16,36 @@ const root = __dirname;
 const distDirectory = path.join(root, 'dist');
 const port = Number(process.env.PORT || 3001);
 const host = process.env.HOST || '127.0.0.1';
-const maxRequestBytes = 1024 * 1024;
+const maxRequestBytes = 5 * 1024 * 1024;
+const maxImportRows = 5000;
 const statuses = new Set(['Not started', 'In progress', 'Blocked', 'Complete']);
+const importSources = {
+  checklist: {
+    table: 'XX_OPERATIONAL_CHECKLIST',
+    columns: [
+      'CHECKLIST_ROW_ID', 'CHECKLIST_NO', 'SUM_SEQ', 'MODULE_NAME', 'PROCESS_OWNER',
+      'STEP_ID', 'PRE_REQUISITE_ID', 'PRE_REQUISITE_DESC', 'STEP_DESCRIPTION',
+      'STEP_COMMENT', 'ACTION_BY', 'WORKDAYS', 'TARGET_DATE', 'TPIT', 'TPIDL',
+      'TENITALYPS', 'BUSINESS_UNIT', 'USER_ROLE', 'ASSIGNED_USER', 'COMPLETION_CHECK',
+      'EXPECTED_OUTCOME', 'ACTION_TYPE', 'PROCESS_TYPE', 'NAVIGATION_PATH',
+      'ACTION_ITEM_DETAILS', 'EXPECTED_START_TIME', 'EXPECTED_COMP_TIME', 'SUSPENSION_STATUS'
+    ],
+    required: ['CHECKLIST_ROW_ID', 'STEP_DESCRIPTION'],
+    numericIds: ['CHECKLIST_ROW_ID']
+  },
+  mapping: {
+    table: 'XX_BU_LE_LEDGER_MAPPING',
+    columns: [
+      'BUSINESS_UNIT_ID', 'BUSINESS_UNIT_NAME', 'LEGAL_ENTITY_ID', 'LEGAL_ENTITY_NAME',
+      'LEDGER_ID', 'LEDGER_NAME', 'CURRENCY_CODE'
+    ],
+    required: [
+      'BUSINESS_UNIT_ID', 'BUSINESS_UNIT_NAME', 'LEGAL_ENTITY_ID',
+      'LEGAL_ENTITY_NAME', 'LEDGER_ID', 'LEDGER_NAME'
+    ],
+    numericIds: ['BUSINESS_UNIT_ID']
+  }
+};
 const progressBindDefs = {
   checklistId: { type: oracledb.STRING, maxSize: 100 },
   businessUnitId: { type: oracledb.STRING, maxSize: 100 },
@@ -251,6 +279,90 @@ async function main() {
           const tasks = await readTasks(connection);
           const entities = await readEntities(connection);
           sendJson(response, 200, { tasks, entities });
+        } finally {
+          await connection.close();
+        }
+        return;
+      }
+
+      const importMatch = url.pathname.match(/^\/api\/imports\/([^/]+)$/);
+      if (request.method === 'POST' && importMatch) {
+        const source = Object.hasOwn(importSources, importMatch[1])
+          ? importSources[importMatch[1]]
+          : null;
+        if (!source) throw new HttpError(404, 'Unknown data source.');
+
+        const body = await readRequestBody(request);
+        if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            !Array.isArray(body.rows) || body.rows.length === 0 || body.rows.length > maxImportRows) {
+          throw new HttpError(400, `Upload must contain between 1 and ${maxImportRows} rows.`);
+        }
+
+        const rows = body.rows.map((row, index) => {
+          if (!row || typeof row !== 'object' || Array.isArray(row) ||
+              Object.keys(row).length !== source.columns.length ||
+              source.columns.some(column => !Object.hasOwn(row, column)) ||
+              Object.keys(row).some(column => !source.columns.includes(column))) {
+            throw new HttpError(400, `Row ${index + 1} does not match the supported template columns.`);
+          }
+
+          const values = {};
+          for (const column of source.columns) {
+            const value = row[column];
+            if (value !== null && typeof value !== 'string') {
+              throw new HttpError(400, `Row ${index + 1}, ${column} must be text.`);
+            }
+            if (typeof value === 'string' && value.length > 4000) {
+              throw new HttpError(400, `Row ${index + 1}, ${column} exceeds 4000 characters.`);
+            }
+            values[column] = value === '' ? null : value;
+          }
+          for (const column of source.required) {
+            if (typeof values[column] !== 'string' || !values[column].trim()) {
+              throw new HttpError(400, `Row ${index + 1}: ${column} is required.`);
+            }
+          }
+          for (const column of source.numericIds) {
+            if (typeof values[column] !== 'string' || !/^\d+$/.test(values[column].trim())) {
+              throw new HttpError(400, `Row ${index + 1}: ${column} must contain digits only.`);
+            }
+            values[column] = values[column].trim();
+          }
+          return values;
+        });
+
+        const binds = Object.fromEntries(source.columns.map(column => [
+          column,
+          { type: oracledb.STRING, maxSize: 4000 }
+        ]));
+        const placeholders = source.columns.map(column => `:${column}`).join(', ');
+        const sql = `INSERT INTO ${source.table} (${source.columns.join(', ')}) VALUES (${placeholders})`;
+        const connection = await pool.getConnection();
+        try {
+          const result = await connection.executeMany(sql, rows, {
+            bindDefs: binds,
+            autoCommit: false
+          });
+          await connection.commit();
+          sendJson(response, 201, { inserted: result.rowsAffected });
+        } catch (error) {
+          await connection.rollback();
+          if (error.errorNum === 1) {
+            throw new HttpError(409, 'An uploaded row conflicts with an existing key. No rows were inserted.');
+          }
+          if (error.errorNum === 1400) {
+            throw new HttpError(400, 'A required Oracle column is empty. No rows were inserted.');
+          }
+          if (error.errorNum === 1722) {
+            throw new HttpError(400, 'A value must use a valid number format for its Oracle column. No rows were inserted.');
+          }
+          if (error.errorNum === 12899) {
+            throw new HttpError(400, 'A value exceeds the allowed length for its Oracle column. No rows were inserted.');
+          }
+          if (error.errorNum === 1861) {
+            throw new HttpError(400, 'A date value does not match the Oracle column format. No rows were inserted.');
+          }
+          throw error;
         } finally {
           await connection.close();
         }
