@@ -25,7 +25,17 @@ A React + Vite finance-close application with a Node.js API that connects direct
    npm install
    ```
 
-2. Ensure the schema has read access to `XX_OPERATIONAL_CHECKLIST` and `XX_BU_LE_LEDGER_MAPPING`. Their columns must match the extracts in `Checklist.xlsx` and `LedgerBU.xlsx`. Run [schema.sql](./schema.sql) once to create `XX_OPERATIONAL_CHECKLIST_PROGRESS`, which stores editable status, owner and comments keyed by checklist row and business unit. The application reads checklist and BU/ledger configuration from the two source tables and does not modify them.
+2. Ensure the schema has read access to `XX_OPERATIONAL_CHECKLIST` and `XX_BU_LE_LEDGER_MAPPING`, and write access to `XX_OPERATIONAL_CHECKLIST_PROGRESS`. The recommended separation is:
+
+   | Table | Purpose | Key columns used by the application |
+   | --- | --- | --- |
+   | `XX_OPERATIONAL_CHECKLIST` | Checklist step definitions; one row per checklist step | `CHECKLIST_ROW_ID`, `CHECKLIST_NO`, `MODULE_NAME`, `SUM_SEQ`, `PROCESS_OWNER`, `STEP_ID`, `PRE_REQUISITE_ID`, `PRE_REQUISITE_DESC`, `STEP_DESCRIPTION`, `STEP_COMMENT`, `ACTION_BY`, `WORKDAYS`, `TARGET_DATE`, `TPIT`, `TPIDL`, `TENITALYPS`, `BUSINESS_UNIT`, `USER_ROLE`, `ASSIGNED_USER`, `COMPLETION_CHECK`, `EXPECTED_OUTCOME`, `ACTION_TYPE`, `PROCESS_TYPE`, `NAVIGATION_PATH`, `ACTION_ITEM_DETAILS`, `EXPECTED_START_TIME`, `EXPECTED_COMP_TIME`, `SUSPENSION_STATUS` |
+   | `XX_BU_LE_LEDGER_MAPPING` | Business unit, legal entity, ledger and currency mapping | `BUSINESS_UNIT_ID`, `BUSINESS_UNIT_NAME`, `LEGAL_ENTITY_ID`, `LEGAL_ENTITY_NAME`, `LEDGER_ID`, `LEDGER_NAME`, `CURRENCY_CODE` |
+   | `XX_OPERATIONAL_CHECKLIST_PROGRESS` | Editable checklist status, owner and note, per checklist row and business unit | `CHECKLIST_ROW_ID`, `BUSINESS_UNIT_ID`, `STATUS`, `OWNER_NAME`, `NOTE`, `NOTE_OVERRIDDEN`, `CREATED_AT`, `UPDATED_AT` |
+
+   Keep `BUSINESS_UNIT_ID` and `LEGAL_ENTITY_ID` in the mapping table; do not add them to the checklist definition table for the current application behavior. The app displays each checklist step for every mapping row, and uses the checklist-row/business-unit pair to store progress. If checklist steps later need to apply only to selected business units or legal entities, the source data and API query must be changed together.
+
+   The source tables are not created or modified by the application; their columns must match the extracts in `Checklist.xlsx` and `LedgerBU.xlsx`. Run [schema.sql](./DBConnect/schema.sql) once to create `XX_OPERATIONAL_CHECKLIST_PROGRESS`.
 
 3. Copy `.env.example` to `.env` and set `DB_USER`, `DB_PASSWORD` and `DB_CONNECT_STRING`. For Autonomous Database, also set `DB_WALLET_LOCATION` and `DB_WALLET_PASSWORD`. Keep `.env` private; it is excluded from Git.
 
