@@ -101,8 +101,7 @@ async function readTasks(connection) {
        LEFT JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS progress
          ON progress.CHECKLIST_ROW_ID = TO_CHAR(checklist.CHECKLIST_ROW_ID)
         AND progress.BUSINESS_UNIT_ID = NVL(checklist.BUSINESS_UNIT, 'Unassigned')
-      ORDER BY checklist.BUSINESS_UNIT, checklist.LEGAL_ENTITY,
-               checklist.MODULE_NAME, checklist.CHECKLIST_ROW_ID`,
+      ORDER BY checklist.CHECKLIST_ROW_ID ASC, checklist.BUSINESS_UNIT ASC`,
     [],
     { outFormat: oracledb.OUT_FORMAT_OBJECT }
   );
@@ -121,6 +120,38 @@ async function readEntities(connection) {
   return result.rows.map(row => ({
     id: row.BUSINESS_UNIT_NAME,
     name: row.BUSINESS_UNIT_NAME
+  }));
+}
+
+async function readBusinessUnits(connection) {
+  const result = await connection.execute(
+    `SELECT MAPPING_ID,
+            BUSINESS_UNIT_ID,
+            BUSINESS_UNIT_NAME,
+            LEGAL_ENTITY_ID,
+            LEGAL_ENTITY_NAME,
+            LEDGER_ID,
+            LEDGER_NAME,
+            CURRENCY_CODE,
+            TO_CHAR(CUTOFF_DATE, 'YYYY-MM-DD') AS CUTOFF_DATE,
+            DUE_DAYS
+       FROM XX_BU_LE_LEDGER_MAPPING
+      ORDER BY MAPPING_ID`,
+    [],
+    { outFormat: oracledb.OUT_FORMAT_OBJECT }
+  );
+
+  return result.rows.map(row => ({
+    MAPPING_ID: row.MAPPING_ID == null ? '' : String(row.MAPPING_ID),
+    BUSINESS_UNIT_ID: row.BUSINESS_UNIT_ID || '',
+    BUSINESS_UNIT_NAME: row.BUSINESS_UNIT_NAME || '',
+    LEGAL_ENTITY_ID: row.LEGAL_ENTITY_ID || '',
+    LEGAL_ENTITY_NAME: row.LEGAL_ENTITY_NAME || '',
+    LEDGER_ID: row.LEDGER_ID || '',
+    LEDGER_NAME: row.LEDGER_NAME || '',
+    CURRENCY_CODE: row.CURRENCY_CODE || '',
+    CUTOFF_DATE: row.CUTOFF_DATE || '',
+    DUE_DAYS: row.DUE_DAYS == null ? '' : String(row.DUE_DAYS)
   }));
 }
 
@@ -233,6 +264,129 @@ async function main() {
           const tasks = await readTasks(connection);
           const entities = await readEntities(connection);
           sendJson(response, 200, { tasks, entities });
+        } finally {
+          await connection.close();
+        }
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/business-units') {
+        const connection = await pool.getConnection();
+        try {
+          const businessUnits = await readBusinessUnits(connection);
+          sendJson(response, 200, { businessUnits });
+        } finally {
+          await connection.close();
+        }
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/business-units') {
+        const body = await readRequestBody(request);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || !body.record || typeof body.record !== 'object' || Array.isArray(body.record)) {
+          throw new HttpError(400, 'Business unit updates require a record object.');
+        }
+
+        const record = body.record;
+        const required = ['BUSINESS_UNIT_ID', 'BUSINESS_UNIT_NAME', 'LEGAL_ENTITY_ID', 'LEGAL_ENTITY_NAME', 'LEDGER_ID', 'LEDGER_NAME'];
+        for (const field of required) {
+          if (!String(record[field] ?? '').trim()) {
+            throw new HttpError(400, `${field} is required.`);
+          }
+        }
+
+        const currencyCode = String(record.CURRENCY_CODE ?? '').trim() || null;
+        const cutoffDate = String(record.CUTOFF_DATE ?? '').trim();
+        const dueDays = String(record.DUE_DAYS ?? '').trim();
+        const dueDaysValue = dueDays === '' ? null : Number(dueDays);
+        if (dueDays !== '' && (!Number.isFinite(dueDaysValue) || dueDaysValue < 0)) {
+          throw new HttpError(400, 'DUE_DAYS must be a non-negative number when provided.');
+        }
+        if (cutoffDate && !/^\d{4}-\d{2}-\d{2}$/.test(cutoffDate)) {
+          throw new HttpError(400, 'CUTOFF_DATE must use YYYY-MM-DD format.');
+        }
+
+        const bindDefs = {
+          BUSINESS_UNIT_ID: { type: oracledb.STRING, maxSize: 255 },
+          BUSINESS_UNIT_NAME: { type: oracledb.STRING, maxSize: 255 },
+          LEGAL_ENTITY_ID: { type: oracledb.STRING, maxSize: 255 },
+          LEGAL_ENTITY_NAME: { type: oracledb.STRING, maxSize: 255 },
+          LEDGER_ID: { type: oracledb.STRING, maxSize: 255 },
+          LEDGER_NAME: { type: oracledb.STRING, maxSize: 255 },
+          CURRENCY_CODE: { type: oracledb.STRING, maxSize: 50 },
+          CUTOFF_DATE: { type: oracledb.STRING, maxSize: 50 },
+          DUE_DAYS: { type: oracledb.NUMBER }
+        };
+
+        const connection = await pool.getConnection();
+        try {
+          await connection.execute(
+            `MERGE INTO XX_BU_LE_LEDGER_MAPPING target
+              USING (
+                SELECT :BUSINESS_UNIT_ID AS BUSINESS_UNIT_ID,
+                       :BUSINESS_UNIT_NAME AS BUSINESS_UNIT_NAME,
+                       :LEGAL_ENTITY_ID AS LEGAL_ENTITY_ID,
+                       :LEGAL_ENTITY_NAME AS LEGAL_ENTITY_NAME,
+                       :LEDGER_ID AS LEDGER_ID,
+                       :LEDGER_NAME AS LEDGER_NAME,
+                       :CURRENCY_CODE AS CURRENCY_CODE,
+                       TO_DATE(:CUTOFF_DATE, 'YYYY-MM-DD') AS CUTOFF_DATE,
+                       :DUE_DAYS AS DUE_DAYS
+                  FROM dual
+              ) source
+              ON (target.BUSINESS_UNIT_ID = source.BUSINESS_UNIT_ID
+                  AND target.LEGAL_ENTITY_ID = source.LEGAL_ENTITY_ID
+                  AND target.LEDGER_ID = source.LEDGER_ID)
+              WHEN MATCHED THEN UPDATE SET
+                target.BUSINESS_UNIT_NAME = source.BUSINESS_UNIT_NAME,
+                target.LEGAL_ENTITY_NAME = source.LEGAL_ENTITY_NAME,
+                target.LEDGER_NAME = source.LEDGER_NAME,
+                target.CURRENCY_CODE = source.CURRENCY_CODE,
+                target.CUTOFF_DATE = source.CUTOFF_DATE,
+                target.DUE_DAYS = source.DUE_DAYS
+              WHEN NOT MATCHED THEN INSERT (
+                BUSINESS_UNIT_ID,
+                BUSINESS_UNIT_NAME,
+                LEGAL_ENTITY_ID,
+                LEGAL_ENTITY_NAME,
+                LEDGER_ID,
+                LEDGER_NAME,
+                CURRENCY_CODE,
+                CUTOFF_DATE,
+                DUE_DAYS
+              ) VALUES (
+                source.BUSINESS_UNIT_ID,
+                source.BUSINESS_UNIT_NAME,
+                source.LEGAL_ENTITY_ID,
+                source.LEGAL_ENTITY_NAME,
+                source.LEDGER_ID,
+                source.LEDGER_NAME,
+                source.CURRENCY_CODE,
+                source.CUTOFF_DATE,
+                source.DUE_DAYS
+              )`,
+            {
+              BUSINESS_UNIT_ID: String(record.BUSINESS_UNIT_ID).trim(),
+              BUSINESS_UNIT_NAME: String(record.BUSINESS_UNIT_NAME).trim(),
+              LEGAL_ENTITY_ID: String(record.LEGAL_ENTITY_ID).trim(),
+              LEGAL_ENTITY_NAME: String(record.LEGAL_ENTITY_NAME).trim(),
+              LEDGER_ID: String(record.LEDGER_ID).trim(),
+              LEDGER_NAME: String(record.LEDGER_NAME).trim(),
+              CURRENCY_CODE: currencyCode,
+              CUTOFF_DATE: cutoffDate || null,
+              DUE_DAYS: dueDaysValue == null ? null : dueDaysValue
+            },
+            { bindDefs, autoCommit: true }
+          );
+          sendJson(response, 200, { ok: true });
+        } catch (error) {
+          if (String(error.message).includes('table or view does not exist') || String(error.message).includes('ORA-00942')) {
+            throw new HttpError(404, 'The XX_BU_LE_LEDGER_MAPPING table is not available in the connected Oracle schema.');
+          }
+          if (String(error.message).includes('ORA-01843') || String(error.message).includes('ORA-01861') || String(error.message).includes('ORA-1861')) {
+            throw new HttpError(400, 'The cutoff date must be a valid date in YYYY-MM-DD format.');
+          }
+          throw error;
         } finally {
           await connection.close();
         }

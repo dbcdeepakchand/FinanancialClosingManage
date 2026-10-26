@@ -3,5 +3,7 @@
 .api-loading{justify-content:flex-start;color:#355b83;background:#eef5ff;border:1px solid #dceafa}
 .api-error .btn{flex-shrink:0}
 .form-error{color:#8f3033;background:#fff0f0;border:1px solid #f1caca;border-radius:7px;padding:10px 12px;font-size:12px;line-height:1.5}
+.business-unit-load-error{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.business-unit-load-error .btn{flex-shrink:0}
 .modal-error{margin:16px 22px 0}
 @media(max-width:720px){.api-error,.api-loading{margin:12px 14px 0}}

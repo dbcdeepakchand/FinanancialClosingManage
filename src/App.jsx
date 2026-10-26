@@ -20,7 +20,7 @@ const uploadTemplates = {
     ]
   },
   mapping: {
-    label: 'Business unit / ledger map',
+    label: 'Upload Business Units',
     fileName: 'business-unit-ledger-template.csv',
     tableName: 'XX_BU_LE_LEDGER_MAPPING',
     required: 'BUSINESS_UNIT_ID, BUSINESS_UNIT_NAME, LEGAL_ENTITY_ID, LEGAL_ENTITY_NAME, LEDGER_ID, LEDGER_NAME',
@@ -136,6 +136,11 @@ function StatusPill({status}) {
   return <span className={`status-pill ${cls}`}><span className="status-dot"/>{status}</span>;
 }
 
+function compareChecklistTasks(a, b) {
+  return Number(a.checklistRowId) - Number(b.checklistRowId) ||
+    a.entity.localeCompare(b.entity);
+}
+
 function Progress({value, color='blue'}) {
   return <div className="progress-track"><div className={`progress-fill ${color}`} style={{width:`${value}%`}} /></div>;
 }
@@ -150,12 +155,12 @@ function StatCard({label,value,sub,icon:Icon,tone}) {
 
 export default function App() {
   const [tasks,setTasks] = useState([]);
-  const [entities,setEntities] = useState([]);
   const [loading,setLoading] = useState(true);
   const [apiError,setApiError] = useState('');
   const [reloadCount,setReloadCount] = useState(0);
   const [saving,setSaving] = useState(false);
   const [page,setPage] = useState('dashboard');
+  const [selectedLegalEntity,setSelectedLegalEntity] = useState('ALL');
   const [selectedEntity,setSelectedEntity] = useState('ALL');
   const [search,setSearch] = useState('');
   const [statusFilter,setStatusFilter] = useState('All statuses');
@@ -168,6 +173,17 @@ export default function App() {
   const [uploadFileName,setUploadFileName] = useState('');
   const [uploadError,setUploadError] = useState('');
   const [uploading,setUploading] = useState(false);
+  const [businessUnits,setBusinessUnits] = useState([]);
+  const [businessUnitsLoading,setBusinessUnitsLoading] = useState(true);
+  const [businessUnitLoadError,setBusinessUnitLoadError] = useState('');
+  const [selectedBusinessUnitId,setSelectedBusinessUnitId] = useState(null);
+  const [businessUnitEditor,setBusinessUnitEditor] = useState(null);
+  const [businessUnitForm,setBusinessUnitForm] = useState({
+    BUSINESS_UNIT_ID: '', BUSINESS_UNIT_NAME: '', LEGAL_ENTITY_ID: '', LEGAL_ENTITY_NAME: '',
+    LEDGER_ID: '', LEDGER_NAME: '', CURRENCY_CODE: '', CUTOFF_DATE: '', DUE_DAYS: ''
+  });
+  const [businessUnitSaving,setBusinessUnitSaving] = useState(false);
+  const [businessUnitError,setBusinessUnitError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -177,14 +193,13 @@ export default function App() {
       try {
         const data = await apiRequest('/tasks');
         if (!Array.isArray(data.tasks) || !Array.isArray(data.entities)) {
-          throw new Error('Oracle returned an unexpected checklist or business-unit response.');
+          throw new Error('Application returned an unexpected checklist or business-unit response.');
         }
         if (!cancelled) {
           setTasks(data.tasks);
-          setEntities(data.entities);
         }
       } catch (error) {
-        if (!cancelled) setApiError(`Could not load tasks from Oracle: ${error.message}`);
+        if (!cancelled) setApiError(`Could not load tasks from Application: ${error.message}`);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -195,31 +210,106 @@ export default function App() {
 
   useEffect(() => { if(toast) { const timer=setTimeout(()=>setToast(''),3200); return ()=>clearTimeout(timer); } },[toast]);
 
-  const applicable = tasks;
+  useEffect(() => {
+    let cancelled = false;
+    const loadBusinessUnits = async () => {
+      setBusinessUnitsLoading(true);
+      setBusinessUnitLoadError('');
+      try {
+        const data = await apiRequest('/business-units');
+        if (!Array.isArray(data.businessUnits)) {
+          throw new Error('Application returned an unexpected Business Unit mapping response.');
+        }
+        if (!cancelled) setBusinessUnits(data.businessUnits);
+      } catch (error) {
+        if (!cancelled) {
+          setBusinessUnits([]);
+          const message = error.message.includes('API route not found.')
+            ? 'The API server is running an older version. Restart it with `npm run api` from the repository root, then retry.'
+            : `Could not load Business Unit mappings from Application: ${error.message}`;
+          setBusinessUnitLoadError(message);
+        }
+      } finally {
+        if (!cancelled) setBusinessUnitsLoading(false);
+      }
+    };
+    loadBusinessUnits();
+    return () => { cancelled = true; };
+  }, [reloadCount]);
+
+  const applicable = selectedLegalEntity === 'ALL'
+    ? tasks
+    : tasks.filter(task => task.legalEntityName === selectedLegalEntity);
+  const legalEntityNames = [...new Set([
+    ...tasks.map(task => task.legalEntityName),
+    ...businessUnits.map(record => record.LEGAL_ENTITY_NAME)
+  ].filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const legalEntityOptions = legalEntityNames.map(name => ({
+    name,
+    businessUnitCount: new Set([
+      ...tasks.filter(task => task.legalEntityName === name).map(task => task.entity),
+      ...businessUnits.filter(record => record.LEGAL_ENTITY_NAME === name)
+        .map(record => record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID)
+    ]).size
+  }));
+  const businessUnitOptions = [...new Map(applicable.map(task => [
+    task.businessUnitId,
+    { id: task.businessUnitId, name: task.entity }
+  ])).values()];
   const visibleTasks = useMemo(() => applicable.filter(t =>
     (selectedEntity === 'ALL' || t.businessUnitId === selectedEntity) &&
     (statusFilter === 'All statuses' || t.status === statusFilter) &&
     (moduleFilter === 'All modules' || t.module === moduleFilter) &&
     [t.title,t.module,t.owner,t.entity,t.legalEntityName]
       .filter(Boolean).join(' ').toLowerCase().includes(search.toLowerCase())
-  ),[applicable,selectedEntity,statusFilter,moduleFilter,search]);
+  ).sort(compareChecklistTasks),[applicable,selectedEntity,statusFilter,moduleFilter,search]);
 
   const completedCount = applicable.filter(t=>t.status==='Complete').length;
   const inProgressCount = applicable.filter(t=>t.status==='In progress').length;
   const blockedCount = applicable.filter(t=>t.status==='Blocked').length;
   const pendingCount = applicable.filter(t=>t.status==='Not started').length;
   const completion = applicable.length ? Math.round(completedCount/applicable.length*100) : 0;
-  const entityStats = entities.map(e=>{
-    const list = applicable.filter(t=>t.businessUnitId===e.id);
+  const scopedBusinessUnits = businessUnits.filter(record =>
+    selectedLegalEntity === 'ALL' || record.LEGAL_ENTITY_NAME === selectedLegalEntity
+  );
+  const mappingBusinessUnits = scopedBusinessUnits.map((record, index) => ({
+    id: record.MAPPING_ID ? `mapping:${record.MAPPING_ID}` : `mapping:${record.BUSINESS_UNIT_ID}:${record.LEGAL_ENTITY_ID}:${record.LEDGER_ID}:${index}`,
+    name: record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID || 'Unassigned',
+    mappingRecord: record
+  }));
+  const businessUnitCards = mappingBusinessUnits.map(e=>{
+    const list = applicable.filter(t =>
+      t.businessUnitId === e.mappingRecord.BUSINESS_UNIT_NAME ||
+      t.entity === e.mappingRecord.BUSINESS_UNIT_NAME
+    );
     const done = list.filter(t=>t.status==='Complete').length;
     const inProgress = list.filter(t=>t.status==='In progress').length;
     const blocked = list.filter(t=>t.status==='Blocked').length;
-    return {...e,total:list.length,done,inProgress,blocked,pending:list.length-done-inProgress-blocked,pct:list.length?Math.round(done/list.length*100):0};
+    return { ...e, total: list.length, done, inProgress, blocked, pending: list.length-done-inProgress-blocked, pct: list.length ? Math.round(done/list.length*100) : 0 };
+  });
+  const dashboardUnits = [
+    ...scopedBusinessUnits.map(record => ({
+      id: record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID || 'Unassigned',
+      name: record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID || 'Unassigned',
+      legalEntityName: record.LEGAL_ENTITY_NAME
+    })),
+    ...applicable.map(task => ({
+      id: task.businessUnitId,
+      name: task.entity,
+      legalEntityName: task.legalEntityName
+    }))
+  ];
+  const entityStats = [...new Map(dashboardUnits.map(unit => [unit.id, unit])).values()].map(e=>{
+    const list = applicable.filter(t=>t.businessUnitId===e.id || t.entity===e.name);
+    const done = list.filter(t=>t.status==='Complete').length;
+    const inProgress = list.filter(t=>t.status==='In progress').length;
+    const blocked = list.filter(t=>t.status==='Blocked').length;
+    return { ...e, total: list.length, done, inProgress, blocked, pending: list.length-done-inProgress-blocked, pct: list.length ? Math.round(done/list.length*100) : 0 };
   });
   const fullyClosed = entityStats.filter(e=>e.total>0 && e.done===e.total).length;
   const modules = [...new Set(applicable.map(t=>t.module))].sort();
   const checklistRows = [...new Map(applicable.map(task=>[task.checklistRowId,task])).values()]
-    .sort((a,b)=>Number(a.checklistRowId)-Number(b.checklistRowId));
+    .sort(compareChecklistTasks);
 
   const updateTask = (id,patch) => {
     setDetailTask(prev=>prev && prev.id===id?{...prev,...patch}:prev);
@@ -239,7 +329,7 @@ export default function App() {
       });
       setTasks(prev=>prev.map(task=>task.id===savedTask.id?{...task,...savedTask}:task));
       setDetailTask(null);
-      setToast('Task changes saved to Oracle.');
+      setToast('Task changes saved to Application.');
     } catch (error) {
       setApiError(`Could not save task: ${error.message}`);
     } finally {
@@ -292,12 +382,71 @@ export default function App() {
       });
       setUploadRows([]);
       setUploadFileName('');
-      setToast(`${result.inserted} rows inserted into Oracle.`);
+      setToast(`${result.inserted} rows inserted into Application.`);
       setReloadCount(count => count + 1);
     } catch (error) {
       setUploadError(`Upload failed: ${error.message}`);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const openBusinessUnitEditor = (record = null) => {
+    const selectedRecord = record || {
+      BUSINESS_UNIT_ID: '',
+      BUSINESS_UNIT_NAME: '',
+      LEGAL_ENTITY_ID: '',
+      LEGAL_ENTITY_NAME: '',
+      LEDGER_ID: '',
+      LEDGER_NAME: '',
+      CURRENCY_CODE: '',
+      CUTOFF_DATE: '',
+      DUE_DAYS: ''
+    };
+    setBusinessUnitForm(selectedRecord);
+    setBusinessUnitError('');
+    setBusinessUnitEditor(true);
+  };
+
+  const updateBusinessUnitField = (field, value) => {
+    setBusinessUnitForm(current => ({ ...current, [field]: value }));
+  };
+
+  const saveBusinessUnitRecord = async () => {
+    setBusinessUnitSaving(true);
+    setBusinessUnitError('');
+    try {
+      const payload = {
+        record: {
+          ...businessUnitForm,
+          BUSINESS_UNIT_ID: String(businessUnitForm.BUSINESS_UNIT_ID ?? '').trim(),
+          BUSINESS_UNIT_NAME: String(businessUnitForm.BUSINESS_UNIT_NAME ?? '').trim(),
+          LEGAL_ENTITY_ID: String(businessUnitForm.LEGAL_ENTITY_ID ?? '').trim(),
+          LEGAL_ENTITY_NAME: String(businessUnitForm.LEGAL_ENTITY_NAME ?? '').trim(),
+          LEDGER_ID: String(businessUnitForm.LEDGER_ID ?? '').trim(),
+          LEDGER_NAME: String(businessUnitForm.LEDGER_NAME ?? '').trim(),
+          CURRENCY_CODE: String(businessUnitForm.CURRENCY_CODE ?? '').trim(),
+          CUTOFF_DATE: String(businessUnitForm.CUTOFF_DATE ?? '').trim(),
+          DUE_DAYS: String(businessUnitForm.DUE_DAYS ?? '').trim()
+        }
+      };
+
+      if (!payload.record.BUSINESS_UNIT_ID || !payload.record.BUSINESS_UNIT_NAME || !payload.record.LEGAL_ENTITY_ID || !payload.record.LEGAL_ENTITY_NAME || !payload.record.LEDGER_ID || !payload.record.LEDGER_NAME) {
+        throw new Error('Business unit, legal entity and ledger details are required.');
+      }
+
+      await apiRequest('/business-units', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+
+      setBusinessUnitEditor(null);
+      setToast('Business unit record saved to XX_BU_LE_LEDGER_MAPPING.');
+      setReloadCount(count => count + 1);
+    } catch (error) {
+      setBusinessUnitError(error.message);
+    } finally {
+      setBusinessUnitSaving(false);
     }
   };
 
@@ -349,21 +498,19 @@ export default function App() {
     <main className="main-area">
       <header className="topbar">
         <div className="topbar-left"><button className="icon-btn mobile-menu" onClick={()=>setMobileNav(true)}><Menu size={20}/></button><span className="breadcrumb">Finance Operations</span><ChevronRight size={14}/><strong>{pageTitle}</strong></div>
-        <div className="topbar-right">
-          <span className="period-badge"><FileSpreadsheet size={15}/> Oracle source</span>
-          <button className="icon-btn notification-btn" title="Blocked tasks" onClick={()=>setToast(`${blockedCount} activities are blocked.`)}><Bell size={18}/><i/></button>
-          <div className="top-avatar">DBC</div>
-        </div>
+        {selectedLegalEntity !== 'ALL' && <div className="selected-entity-context"><span>LEGAL ENTITY</span><strong>{selectedLegalEntity}</strong></div>}
       </header>
 
       {apiError && <div className="api-error" role="alert"><span>{apiError}</span><button className="btn secondary compact" onClick={()=>setReloadCount(count=>count+1)} disabled={loading}>Retry</button></div>}
-      {loading && <div className="api-loading" role="status">Connecting to Oracle and loading close tasks…</div>}
+      {loading && <div className="api-loading" role="status">Connecting to Application and loading close tasks…</div>}
       <div className="page-content">
         {page==='dashboard' && <Dashboard
           completion={completion} completedCount={completedCount}
           inProgressCount={inProgressCount} blockedCount={blockedCount} pendingCount={pendingCount}
           fullyClosed={fullyClosed} moduleCount={modules.length} entityStats={entityStats}
-          applicable={applicable} onGoChecklist={()=>setPage('checklist')} onSelectEntity={id=>{setSelectedEntity(id);setPage('checklist');}}
+            legalEntityOptions={legalEntityOptions} selectedLegalEntity={selectedLegalEntity}
+            onSelectLegalEntity={name=>{setSelectedLegalEntity(name);setSelectedEntity('ALL');}}
+            applicable={applicable} onGoChecklist={()=>setPage('checklist')} onSelectEntity={id=>{setSelectedEntity(id);setPage('checklist');}}
           onViewEntities={()=>setPage('entities')} onOpenTask={t=>setDetailTask(t)}
         />}
 
@@ -371,7 +518,7 @@ export default function App() {
           <div className="page-heading"><div><div className="eyebrow">CLOSE EXECUTION</div><h1>Operational checklist</h1><p>Checklist activities are assigned directly to the business unit and legal entity in each source row.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export</button></div>
           <div className="inline-summary"><div><span className="summary-dot green"/><strong>{completedCount}</strong><span>Complete</span></div><div><span className="summary-dot blue"/><strong>{inProgressCount}</strong><span>In progress</span></div><div><span className="summary-dot amber"/><strong>{pendingCount}</strong><span>Not started</span></div><div><span className="summary-dot red"/><strong>{blockedCount}</strong><span>Blocked</span></div></div>
           <div className="table-card">
-            <div className="table-toolbar"><div className="search-box"><Search size={16}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search activities, owners, units..."/></div><div className="toolbar-filters"><select value={selectedEntity} onChange={e=>setSelectedEntity(e.target.value)}><option value="ALL">All business units</option>{entities.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select><select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option>All statuses</option><option>Not started</option><option>In progress</option><option>Blocked</option><option>Complete</option></select><select value={moduleFilter} onChange={e=>setModuleFilter(e.target.value)}><option>All modules</option>{modules.map(m=><option key={m}>{m}</option>)}</select></div></div>
+            <div className="table-toolbar"><div className="search-box"><Search size={16}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search activities, owners, units..."/></div><div className="toolbar-filters"><select value={selectedEntity} onChange={e=>setSelectedEntity(e.target.value)}><option value="ALL">All business units</option>{businessUnitOptions.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select><select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option>All statuses</option><option>Not started</option><option>In progress</option><option>Blocked</option><option>Complete</option></select><select value={moduleFilter} onChange={e=>setModuleFilter(e.target.value)}><option>All modules</option>{modules.map(m=><option key={m}>{m}</option>)}</select></div></div>
             <div className="table-scroll"><table><thead><tr><th>Activity</th><th>Business unit / legal entity</th><th>Process owner</th><th>Action / process type</th><th>Status</th><th></th></tr></thead><tbody>
               {visibleTasks.map(t=><tr key={t.id} onClick={()=>setDetailTask(t)} className="clickable-row"><td><div className="task-name">{t.status==='Complete'?<CheckCircle2 size={16} className="task-check done"/>:<Circle size={16} className="task-check"/>}<div><strong>{t.title}</strong><small>{t.module}</small></div></div></td><td><span className="entity-code">{t.entity}</span><span className="entity-short">{t.legalEntityName}</span></td><td><span className="owner-name"><span className="mini-avatar">{t.owner.split(' ').map(s=>s[0]).join('').slice(0,2)}</span>{t.owner}</span></td><td>{t.actionType || t.processType || '—'}</td><td><StatusPill status={t.status}/></td><td><button className="row-more" onClick={e=>{e.stopPropagation();setDetailTask(t)}}><ChevronRight size={17}/></button></td></tr>)}
               {visibleTasks.length===0&&<tr><td colSpan="6" className="empty-state">No tasks match your filters.</td></tr>}
@@ -381,11 +528,34 @@ export default function App() {
         </section>}
 
         {page==='entities' && <section className="page-section">
-          <div className="page-heading"><div><div className="eyebrow">BUSINESS UNIT OVERSIGHT</div><h1>Business units</h1><p>Business units and legal entities recorded in the checklist source rows.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export overview</button></div>
-          <div className="entity-grid">{entityStats.map(e=><button key={e.id} className="entity-card" onClick={()=>{setSelectedEntity(e.id);setPage('checklist');}}>
-            <div className="entity-card-top"><div className="entity-symbol"><Building2 size={19}/></div><ChevronRight size={16}/></div>
-            <h3>{e.name}</h3><div className="entity-progress-label"><span>Close completion</span><strong>{e.pct}%</strong></div><Progress value={e.pct} color={e.pct===100?'green':'blue'}/><div className="entity-card-bottom"><span><CheckCircle2 size={14}/>{e.done} complete</span><span><Clock3 size={14}/>{e.pending+e.inProgress+e.blocked} open</span></div>
-          </button>)}</div>
+          <div className="page-heading"><div><div className="eyebrow">BUSINESS UNIT OVERSIGHT</div><h1>Business units</h1><p>{businessUnitsLoading ? 'Loading mapping records…' : `${businessUnits.length} mapping records from XX_BU_LE_LEDGER_MAPPING.`}</p></div><div className="entity-page-actions"><button className="btn secondary add-bu-button" onClick={()=>openBusinessUnitEditor()}><CheckCircle2 size={16}/> Add business unit</button>{selectedBusinessUnitId && <button className="btn secondary" onClick={() => {
+            const selected = businessUnitCards.find(e => e.id === selectedBusinessUnitId);
+            openBusinessUnitEditor(selected?.mappingRecord || {
+              BUSINESS_UNIT_ID: String(selected?.sourceId || ''),
+              BUSINESS_UNIT_NAME: selected?.name || '',
+              LEGAL_ENTITY_ID: '',
+              LEGAL_ENTITY_NAME: '',
+              LEDGER_ID: '',
+              LEDGER_NAME: '',
+              CURRENCY_CODE: '',
+              CUTOFF_DATE: '',
+              DUE_DAYS: ''
+            });
+          }}><CheckCircle2 size={16}/> Update mapping</button>}<button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export overview</button></div></div>
+          {businessUnitLoadError && <div className="form-error business-unit-load-error" role="alert"><span>{businessUnitLoadError}</span><button className="btn secondary compact" onClick={()=>setReloadCount(count=>count+1)} disabled={businessUnitsLoading}>Retry</button></div>}
+          {businessUnitsLoading && <div className="api-loading" role="status">Loading Business Units from XX_BU_LE_LEDGER_MAPPING…</div>}
+          {!businessUnitsLoading && !businessUnitLoadError && businessUnitCards.length === 0 && <div className="empty-state">No Business Unit mapping records were found in XX_BU_LE_LEDGER_MAPPING.</div>}
+          {!businessUnitsLoading && !businessUnitLoadError && <div className="entity-grid">{businessUnitCards.map(e=>{
+            const isSelected = selectedBusinessUnitId === e.id;
+            return <div key={e.id} className="entity-card-wrap">
+              <button className={`entity-card ${isSelected ? 'selected' : ''}`} aria-pressed={isSelected} onClick={()=>setSelectedBusinessUnitId(isSelected ? null : e.id)}>
+                <span className={`entity-selection-radio ${isSelected ? 'selected' : ''}`} aria-hidden="true"/>
+                <div className="entity-card-top"><div className="entity-symbol"><Building2 size={19}/></div><ChevronRight size={16}/></div>
+                <h3>{e.name}</h3>
+                <div className="entity-progress-label"><span>Close completion</span><strong>{e.pct}%</strong></div><Progress value={e.pct} color={e.pct===100?'green':'blue'}/><div className="entity-card-bottom"><span><CheckCircle2 size={14}/>{e.done} complete</span><span><Clock3 size={14}/>{e.pending+e.inProgress+e.blocked} open</span></div>
+              </button>
+            </div>;
+          })}</div>}
         </section>}
 
         {page==='calendar' && <section className="page-section">
@@ -401,22 +571,22 @@ export default function App() {
 
         {page==='reports' && <section className="page-section">
           <div className="page-heading"><div><div className="eyebrow">PERFORMANCE & INSIGHTS</div><h1>Reports & analytics</h1><p>Review progress, workload and close execution risks.</p></div><button className="btn primary" onClick={exportCsv}><Download size={16}/> Export report</button></div>
-          <div className="stats-grid"><StatCard label="Overall completion" value={`${completion}%`} sub={`${completedCount} of ${applicable.length} activities`} icon={ChartNoAxesCombined} tone="blue"/><StatCard label="Business units fully closed" value={`${fullyClosed} / ${entities.length}`} sub="All source business-unit/legal-entity rows complete" icon={ShieldCheck} tone="green"/><StatCard label="Checklist modules" value={modules.length} sub="Distinct modules in the source rows" icon={CalendarRange} tone="amber"/><StatCard label="Blocked tasks" value={blockedCount} sub="Requires intervention" icon={CircleAlert} tone="red"/></div>
+          <div className="stats-grid"><StatCard label="Overall completion" value={`${completion}%`} sub={`${completedCount} of ${applicable.length} activities`} icon={ChartNoAxesCombined} tone="blue"/><StatCard label="Business units fully closed" value={`${fullyClosed} / ${entityStats.length}`} sub="All source business-unit/legal-entity rows complete" icon={ShieldCheck} tone="green"/><StatCard label="Checklist modules" value={modules.length} sub="Distinct modules in the source rows" icon={CalendarRange} tone="amber"/><StatCard label="Blocked tasks" value={blockedCount} sub="Requires intervention" icon={CircleAlert} tone="red"/></div>
           <div className="reports-grid"><div className="panel"><div className="panel-heading"><div><h2>Business unit completion</h2><p>Completion rate by source business unit</p></div><span className="panel-icon"><ChartNoAxesCombined size={18}/></span></div><div className="bar-chart">{entityStats.map(e=><div className="bar-row" key={e.id}><span title={e.name}>{e.name}</span><div className="bar-bg"><div className="bar-fill" style={{width:`${e.pct}%`}}/></div><strong>{e.pct}%</strong></div>)}</div></div>
           <div className="panel"><div className="panel-heading"><div><h2>Task status mix</h2><p>Current operational checklist instances</p></div><span className="panel-icon"><Activity size={18}/></span></div><div className="status-breakdown"><div className="donut-wrap"><div className="donut" style={{background:`conic-gradient(#1b9875 0 ${completedCount/Math.max(applicable.length,1)*100}%, #4b88d2 ${completedCount/Math.max(applicable.length,1)*100}% ${(completedCount+inProgressCount)/Math.max(applicable.length,1)*100}%, #d99a2b ${(completedCount+inProgressCount)/Math.max(applicable.length,1)*100}% ${(completedCount+inProgressCount+pendingCount)/Math.max(applicable.length,1)*100}%, #d75d5d ${(completedCount+inProgressCount+pendingCount)/Math.max(applicable.length,1)*100}% 100%)`}}><div className="donut-hole"><strong>{completion}%</strong><span>Complete</span></div></div></div><div className="legend">{[['Complete',completedCount,'green'],['In progress',inProgressCount,'blue'],['Not started',pendingCount,'amber'],['Blocked',blockedCount,'red']].map(([label,count,color])=><div className="legend-item" key={label}><span className={`legend-dot ${color}`}/><span>{label}</span><strong>{count}</strong></div>)}</div></div></div></div>
           <div className="panel attention-panel"><div className="panel-heading"><div><h2>Blocked activities</h2><p>Activities currently marked blocked</p></div><button className="text-btn" onClick={()=>setPage('checklist')}>View checklist <ArrowUpRight size={14}/></button></div><div className="attention-list">{applicable.filter(t=>t.status==='Blocked').slice(0,7).map(t=><button key={t.id} className="attention-item" onClick={()=>setDetailTask(t)}><span className="attention-alert red"><AlertTriangle size={16}/></span><span className="attention-copy"><strong>{t.title}</strong><small>{t.entity} · {t.owner}</small></span><StatusPill status={t.status}/><ChevronRight size={16}/></button>)}</div></div>
         </section>}
 
         {page==='dataSource' && <section className="page-section">
-          <div className="page-heading"><div><div className="eyebrow">ORACLE SOURCE DATA</div><h1>{uploadTemplates[dataSource].label}</h1><p>Upload a CSV to insert source records directly into the Oracle table used by the application.</p></div><button className="btn secondary" onClick={downloadUploadTemplate}><Download size={16}/> Download template</button></div>
+          <div className="page-heading"><div><h1>{uploadTemplates[dataSource].label}</h1></div><button className="btn secondary" onClick={downloadUploadTemplate}><Download size={16}/> Download template</button></div>
           <div className="upload-card">
             <div className="upload-card-icon"><FileSpreadsheet size={21}/></div>
-            <div className="upload-card-copy"><h2>Upload source data</h2><p>Oracle table: <code>{uploadTemplates[dataSource].tableName}</code></p><p>Use the downloaded CSV template and keep its column headers unchanged. Required fields: {uploadTemplates[dataSource].required}. Empty cells are imported as null.</p></div>
+            <div className="upload-card-copy"><h2>{uploadTemplates[dataSource].label}</h2></div>
             <div className="upload-controls">
               <label className="btn secondary upload-file-label"><Upload size={16}/> Choose CSV<input type="file" accept=".csv,text/csv" onChange={selectUploadFile}/></label>
               <button className="btn primary" onClick={submitUpload} disabled={!uploadRows.length||uploading}><Upload size={16}/>{uploading?'Uploading…':`Insert ${uploadRows.length||''} rows`}</button>
             </div>
-            <p className="upload-guidance">CSV only · Up to 5,000 rows and 5 MB per upload. Uploads append rows; existing records are not replaced. Duplicate keys or invalid Oracle values reject the entire upload.</p>
+            <p className="upload-guidance">CSV only · Up to 5,000 rows and 5 MB per upload. </p>
             {uploadFileName && <div className="upload-file-status"><CheckCircle2 size={16}/><span><strong>{uploadFileName}</strong> · {uploadRows.length} rows ready to insert</span></div>}
             {uploadError && <p className="form-error upload-error" role="alert">{uploadError}</p>}
           </div>
@@ -445,20 +615,39 @@ export default function App() {
       <div className="drawer-footer"><button className="btn secondary" onClick={()=>setDetailTask(null)}>Cancel</button><button className="btn primary" onClick={saveTask} disabled={saving}><Check size={16}/>{saving?'Saving…':'Save changes'}</button></div>
     </div></div>}
 
+    {businessUnitEditor !== null && <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setBusinessUnitEditor(null)}}><div className="detail-drawer business-unit-drawer">
+      <div className="drawer-head"><div><div className="eyebrow">BUSINESS UNIT RECORD</div><h2>{businessUnitForm.BUSINESS_UNIT_NAME ? 'Update mapping' : 'Add business unit'}</h2></div><button className="icon-btn" onClick={()=>setBusinessUnitEditor(null)}><X size={19}/></button></div>
+      <div className="drawer-body business-unit-form-body">
+        {businessUnitError && <p className="form-error" role="alert">{businessUnitError}</p>}
+        <div className="field-grid">
+          <div><label className="field-label">Business unit ID</label><input className="field-control" value={businessUnitForm.BUSINESS_UNIT_ID} onChange={e=>updateBusinessUnitField('BUSINESS_UNIT_ID', e.target.value)}/></div>
+          <div><label className="field-label">Business unit name</label><input className="field-control" value={businessUnitForm.BUSINESS_UNIT_NAME} onChange={e=>updateBusinessUnitField('BUSINESS_UNIT_NAME', e.target.value)}/></div>
+          <div><label className="field-label">Legal entity ID</label><input className="field-control" value={businessUnitForm.LEGAL_ENTITY_ID} onChange={e=>updateBusinessUnitField('LEGAL_ENTITY_ID', e.target.value)}/></div>
+          <div><label className="field-label">Legal entity name</label><input className="field-control" value={businessUnitForm.LEGAL_ENTITY_NAME} onChange={e=>updateBusinessUnitField('LEGAL_ENTITY_NAME', e.target.value)}/></div>
+          <div><label className="field-label">Ledger ID</label><input className="field-control" value={businessUnitForm.LEDGER_ID} onChange={e=>updateBusinessUnitField('LEDGER_ID', e.target.value)}/></div>
+          <div><label className="field-label">Ledger name</label><input className="field-control" value={businessUnitForm.LEDGER_NAME} onChange={e=>updateBusinessUnitField('LEDGER_NAME', e.target.value)}/></div>
+          <div><label className="field-label">Currency code</label><input className="field-control" value={businessUnitForm.CURRENCY_CODE} onChange={e=>updateBusinessUnitField('CURRENCY_CODE', e.target.value)}/></div>
+          <div><label className="field-label">Cutoff date</label><input className="field-control" type="date" value={businessUnitForm.CUTOFF_DATE} onChange={e=>updateBusinessUnitField('CUTOFF_DATE', e.target.value)}/></div>
+          <div><label className="field-label">Due days</label><input className="field-control" type="number" value={businessUnitForm.DUE_DAYS} onChange={e=>updateBusinessUnitField('DUE_DAYS', e.target.value)}/></div>
+        </div>
+      </div>
+      <div className="drawer-footer"><button className="btn secondary" onClick={()=>setBusinessUnitEditor(null)}>Cancel</button><button className="btn primary" onClick={saveBusinessUnitRecord} disabled={businessUnitSaving}><Check size={16}/>{businessUnitSaving?'Saving…':'Save mapping'}</button></div>
+    </div></div>}
+
     {toast && <div className="toast"><CheckCircle2 size={17}/>{toast}<button onClick={()=>setToast('')}><X size={15}/></button></div>}
   </div>;
 }
 
 function Dashboard(props) {
-  const {completion,completedCount,inProgressCount,blockedCount,pendingCount,fullyClosed,moduleCount,entityStats,applicable,onGoChecklist,onSelectEntity,onViewEntities,onOpenTask}=props;
+  const {completion,completedCount,inProgressCount,blockedCount,pendingCount,fullyClosed,moduleCount,entityStats,applicable,legalEntityOptions,selectedLegalEntity,onSelectLegalEntity,onGoChecklist,onSelectEntity,onViewEntities,onOpenTask}=props;
   const openTasks=applicable.filter(t=>t.status!=='Complete');
   const attention=applicable.filter(t=>t.status==='Blocked').slice(0,5);
   const schedule=[...new Map(applicable.map(task=>[task.checklistRowId,task])).values()]
-    .sort((a,b)=>Number(a.checklistRowId)-Number(b.checklistRowId))
+    .sort(compareChecklistTasks)
     .slice(0,5);
   return <section className="page-section">
-    <div className="welcome-row"><div><div className="eyebrow">GROUP FINANCE / CLOSE MANAGEMENT</div><h1>Operational checklist overview</h1><p>Activity status across <strong>{entityStats.length} business unit / legal entity combinations</strong>.</p></div><div className="welcome-actions"><span className="period-badge"><FileSpreadsheet size={15}/> Oracle data</span><button className="btn primary" onClick={onGoChecklist}><ListChecks size={16}/> Open checklist</button></div></div>
-    <div className="callout"><div className="callout-icon"><Sparkles size={19}/></div><div className="callout-copy"><strong>Checklist overview</strong><p>{completion}% of {applicable.length} checklist activities are complete across {entityStats.length} business unit / legal entity combinations. <b>{blockedCount} activities</b> are blocked and need review.</p></div><button className="callout-link" onClick={onGoChecklist}>Review tasks <ArrowUpRight size={14}/></button></div>
+    <div className="welcome-row"><div><div className="eyebrow">GROUP FINANCE / CLOSE MANAGEMENT</div><h1>Operational checklist overview</h1>{selectedLegalEntity !== 'ALL' && <p>Activity status across {selectedLegalEntity}.</p>}</div><div className="welcome-actions"><label className="legal-entity-lov"><select aria-label="Legal entity / business unit" value={selectedLegalEntity} onChange={event=>onSelectLegalEntity(event.target.value)}><option value="ALL">All legal entities / business units</option>{legalEntityOptions.map(entity=><option key={entity.name} value={entity.name}>{entity.name} ({entity.businessUnitCount} business units)</option>)}</select></label><button className="btn primary" onClick={onGoChecklist}><ListChecks size={16}/> Open checklist</button></div></div>
+    <div className="callout"><div className="callout-icon"><Sparkles size={19}/></div><div className="callout-copy"><strong>Checklist overview</strong>{selectedLegalEntity !== 'ALL' && <p>{completion}% of {applicable.length} checklist activities are complete for <b>{selectedLegalEntity}</b>. <b>{blockedCount} activities</b> are blocked and need review.</p>}</div><button className="callout-link" onClick={onGoChecklist}>Review tasks <ArrowUpRight size={14}/></button></div>
     <div className="stats-grid">
       <StatCard label="Checklist completion" value={`${completion}%`} sub={`${completedCount} of ${applicable.length} activities complete`} icon={ChartNoAxesCombined} tone="blue"/>
       <StatCard label="Business units fully closed" value={`${fullyClosed} / ${entityStats.length}`} sub="All source checklist rows complete" icon={ShieldCheck} tone="green"/>
@@ -469,7 +658,7 @@ function Dashboard(props) {
       <div className="panel entity-overview">
         <div className="panel-heading"><div><h2>Business unit overview</h2><p>Close progress by source BU / legal entity</p></div><button className="text-btn" onClick={onViewEntities}>View all units <ArrowUpRight size={14}/></button></div>
         <div className="entity-table"><div className="entity-table-head"><span>BUSINESS UNIT</span><span>PROGRESS</span><span>STATUS</span></div>
-          {entityStats.slice(0,7).map(e=><button className="entity-table-row" key={e.id} onClick={()=>onSelectEntity(e.id)}><div className="entity-cell"><div className="entity-mini-icon"><Building2 size={16}/></div><div><strong>{e.name}</strong><small>Business unit</small></div></div><div className="entity-progress-cell"><div className="entity-progress-text"><strong>{e.pct}%</strong><small>{e.done}/{e.total} tasks</small></div><Progress value={e.pct} color={e.pct===100?'green':'blue'}/></div><div className="entity-status-cell">{e.pct===100?<StatusPill status="Complete"/>:e.blocked>0?<StatusPill status="Blocked"/>:<StatusPill status={e.inProgress>0?'In progress':'Not started'}/>}</div></button>)}
+          {entityStats.slice(0,7).map(e=><button className="entity-table-row" key={e.id} onClick={()=>onSelectEntity(e.id)}><div className="entity-cell"><div className="entity-mini-icon"><Building2 size={16}/></div><div><strong>{e.name}</strong><small>{e.legalEntityName || 'Business unit'}</small></div></div><div className="entity-progress-cell"><div className="entity-progress-text"><strong>{e.pct}%</strong><small>{e.done}/{e.total} tasks</small></div><Progress value={e.pct} color={e.pct===100?'green':'blue'}/></div><div className="entity-status-cell">{e.pct===100?<StatusPill status="Complete"/>:e.blocked>0?<StatusPill status="Blocked"/>:<StatusPill status={e.inProgress>0?'In progress':'Not started'}/>}</div></button>)}
         </div><button className="panel-bottom-link" onClick={onViewEntities}>View all {entityStats.length} business units <ChevronRight size={15}/></button>
       </div>
       <div className="panel attention-panel">

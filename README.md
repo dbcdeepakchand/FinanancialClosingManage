@@ -6,6 +6,7 @@ A React + Vite finance-close application with a Node.js API that connects direct
 
 - Executive dashboard, operational checklist, business-unit overview and reports
 - Checklist activities associated directly with their source business unit and legal entity
+- Legal-entity/business-unit selector that scopes dashboard, checklist, business-unit, calendar and report information
 - Search and filter checklist activities, owners, modules and status
 - Edit task status, owner and comments without changing the source checklist
 - Upload operational-checklist rows to Oracle from a downloadable CSV template
