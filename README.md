@@ -13,6 +13,10 @@ A React + Vite finance-close application with a Node.js API that connects direct
 - Export visible checklist rows to CSV
 - Shared Oracle Database persistence and responsive desktop, tablet and mobile layout
 
+## Frontend organization
+
+`src/App.jsx` owns shared application state, navigation, API interactions and the task/business-unit editors. Each page view is implemented separately in `src/pages/` (`DashboardPage`, `ChecklistPage`, `BusinessUnitsPage`, `CalendarPage`, `ReportsPage` and `DataSourcePage`), with shared display components in `src/components/`.
+
 ## Requirements
 
 - Node.js 18 or later
