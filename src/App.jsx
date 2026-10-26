@@ -109,13 +109,13 @@ async function apiRequest(path, options = {}) {
   if (rawText) {
     const trimmed = rawText.trim();
     if (trimmed.startsWith('<')) {
-      throw new Error('Oracle API is unavailable or returned an HTML page instead of JSON. Start the API server and retry.');
+      throw new Error('Application API is unavailable or returned an HTML page instead of JSON. Start the API server and retry.');
     }
 
     try {
       result = JSON.parse(trimmed);
     } catch (error) {
-      const fallback = contentType.includes('application/json') ? 'The Oracle response was not valid JSON.' : 'The Oracle API returned an unexpected response.';
+      const fallback = contentType.includes('application/json') ? 'The Application response was not valid JSON.' : 'The Application API returned an unexpected response.';
       throw new Error(fallback);
     }
   }
@@ -123,7 +123,7 @@ async function apiRequest(path, options = {}) {
   if (!response.ok) {
     const message = result?.error ||
       (response.status >= 500 && !rawText
-        ? 'The API server did not respond. In development, start it with `npm run api` in a separate terminal and configure Oracle settings in `.env`.'
+        ? 'The API server did not respond. In development, start it with `npm run api` in a separate terminal and configure Applicationsettings in `.env`.'
         : `Request failed (${response.status})`);
     throw new Error(message);
   }
@@ -167,6 +167,7 @@ export default function App() {
   const [moduleFilter,setModuleFilter] = useState('All modules');
   const [toast,setToast] = useState('');
   const [mobileNav,setMobileNav] = useState(false);
+  const [sidebarCollapsed,setSidebarCollapsed] = useState(false);
   const [detailTask,setDetailTask] = useState(null);
   const [dataSource,setDataSource] = useState('checklist');
   const [uploadRows,setUploadRows] = useState([]);
@@ -464,7 +465,7 @@ export default function App() {
 
   const pageTitle = page === 'dataSource' ? 'Data source' : navItems.find(n=>n.id===page)?.label || 'Dashboard';
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${sidebarCollapsed?'sidebar-collapsed':''}`}>
     <aside className={`sidebar ${mobileNav?'mobile-open':''}`}>
       <div className="brand">
         <div className="brand-mark"><Activity size={22}/></div>
@@ -489,21 +490,18 @@ export default function App() {
         <p>View the close process guide and checklist standards.</p>
         <button onClick={()=>setToast('Connect your internal close process guide to enable this link.')}>Open guide <ArrowUpRight size={13}/></button>
       </div>
-      <div className="sidebar-user">
-        <div className="avatar">FC</div><div className="user-copy"><strong>Finance Controller</strong><small>Group Finance · Admin</small></div><MoreHorizontal size={18} className="muted"/>
-      </div>
     </aside>
 
     {mobileNav && <div className="mobile-backdrop" onClick={()=>setMobileNav(false)}/>}
     <main className="main-area">
       <header className="topbar">
-        <div className="topbar-left"><button className="icon-btn mobile-menu" onClick={()=>setMobileNav(true)}><Menu size={20}/></button><span className="breadcrumb">Finance Operations</span><ChevronRight size={14}/><strong>{pageTitle}</strong></div>
+        <div className="topbar-left"><button className="icon-btn mobile-menu" aria-label="Toggle navigation" aria-expanded={window.matchMedia('(max-width: 720px)').matches ? mobileNav : !sidebarCollapsed} onClick={()=>{if(window.matchMedia('(max-width: 720px)').matches){setMobileNav(open=>!open);}else{setSidebarCollapsed(collapsed=>!collapsed);}}}><Menu size={20}/></button><span className="breadcrumb">Finance Operations</span><ChevronRight size={14}/><strong>{pageTitle}</strong></div>
         {selectedLegalEntity !== 'ALL' && <div className="selected-entity-context"><span>LEGAL ENTITY</span><strong>{selectedLegalEntity}</strong></div>}
       </header>
 
       {apiError && <div className="api-error" role="alert"><span>{apiError}</span><button className="btn secondary compact" onClick={()=>setReloadCount(count=>count+1)} disabled={loading}>Retry</button></div>}
       {loading && <div className="api-loading" role="status">Connecting to Application and loading close tasks…</div>}
-      <div className="page-content">
+      <div className={`page-content ${page==='entities' ? 'business-units-content' : ''}`}>
         {page==='dashboard' && <Dashboard
           completion={completion} completedCount={completedCount}
           inProgressCount={inProgressCount} blockedCount={blockedCount} pendingCount={pendingCount}
@@ -648,7 +646,7 @@ function Dashboard(props) {
   return <section className="page-section">
     <div className="welcome-row"><div><div className="eyebrow">GROUP FINANCE / CLOSE MANAGEMENT</div><h1>Operational checklist overview</h1>{selectedLegalEntity !== 'ALL' && <p>Activity status across {selectedLegalEntity}.</p>}</div><div className="welcome-actions"><label className="legal-entity-lov"><select aria-label="Legal entity / business unit" value={selectedLegalEntity} onChange={event=>onSelectLegalEntity(event.target.value)}><option value="ALL">All legal entities / business units</option>{legalEntityOptions.map(entity=><option key={entity.name} value={entity.name}>{entity.name} ({entity.businessUnitCount} business units)</option>)}</select></label><button className="btn primary" onClick={onGoChecklist}><ListChecks size={16}/> Open checklist</button></div></div>
     <div className="callout"><div className="callout-icon"><Sparkles size={19}/></div><div className="callout-copy"><strong>Checklist overview</strong>{selectedLegalEntity !== 'ALL' && <p>{completion}% of {applicable.length} checklist activities are complete for <b>{selectedLegalEntity}</b>. <b>{blockedCount} activities</b> are blocked and need review.</p>}</div><button className="callout-link" onClick={onGoChecklist}>Review tasks <ArrowUpRight size={14}/></button></div>
-    <div className="stats-grid">
+    <div className="stats-grid dashboard-stats-grid">
       <StatCard label="Checklist completion" value={`${completion}%`} sub={`${completedCount} of ${applicable.length} activities complete`} icon={ChartNoAxesCombined} tone="blue"/>
       <StatCard label="Business units fully closed" value={`${fullyClosed} / ${entityStats.length}`} sub="All source checklist rows complete" icon={ShieldCheck} tone="green"/>
       <StatCard label="Open activities" value={openTasks.length.toLocaleString()} sub={`${inProgressCount} currently in progress`} icon={Clock3} tone="amber"/>
@@ -669,7 +667,7 @@ function Dashboard(props) {
     </div>
     <div className="bottom-grid">
       <div className="panel"><div className="panel-heading"><div><h2>Close progress</h2><p>Overall activity status</p></div><span className="panel-icon"><Activity size={18}/></span></div><div className="big-progress"><div className="big-progress-value">{completion}%</div><div className="big-progress-copy"><strong>Activities completed</strong><span>{completedCount} completed out of {applicable.length} tasks</span></div></div><Progress value={completion} color="green"/><div className="status-metrics"><div><span className="legend-dot green"/><span>Complete</span><strong>{completedCount}</strong></div><div><span className="legend-dot blue"/><span>In progress</span><strong>{inProgressCount}</strong></div><div><span className="legend-dot amber"/><span>Not started</span><strong>{pendingCount}</strong></div><div><span className="legend-dot red"/><span>Blocked</span><strong>{blockedCount}</strong></div></div></div>
-      <div className="panel"><div className="panel-heading"><div><h2>Source checklist</h2><p>Activities recorded in Oracle</p></div><span className="panel-icon"><CalendarDays size={18}/></span></div><div className="milestone-list">{schedule.map((task,index)=><div className="milestone" key={task.checklistRowId}><div className={`milestone-check ${task.status==='Complete'?'done':''}`}>{task.status==='Complete'?<Check size={13}/>:index+1}</div><div className="milestone-copy"><strong>{task.title}</strong><small>{task.module} · {task.status}</small></div><span className="milestone-day">{task.entity}</span></div>)}</div></div>
+      <div className="panel"><div className="panel-heading"><div><h2>Source checklist</h2><p>Activities recorded in Application</p></div><span className="panel-icon"><CalendarDays size={18}/></span></div><div className="milestone-list">{schedule.map((task,index)=><div className="milestone" key={task.checklistRowId}><div className={`milestone-check ${task.status==='Complete'?'done':''}`}>{task.status==='Complete'?<Check size={13}/>:index+1}</div><div className="milestone-copy"><strong>{task.title}</strong><small>{task.module} · {task.status}</small></div><span className="milestone-day">{task.entity}</span></div>)}</div></div>
     </div>
   </section>;
 }
