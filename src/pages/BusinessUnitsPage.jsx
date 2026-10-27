@@ -22,10 +22,10 @@ export default function BusinessUnitsPage({
   };
 
   return <section className="page-section">
-    <div className="page-heading"><div><div className="eyebrow">BUSINESS UNIT OVERSIGHT</div><h1>Business units</h1></div><div className="entity-page-actions"><button className="btn secondary add-bu-button" onClick={()=>openBusinessUnitEditor()}><CheckCircle2 size={16}/> Add business unit</button>{selectedBusinessUnitId && <button className="btn secondary" onClick={updateSelected}><CheckCircle2 size={16}/> Update mapping</button>}<button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export overview</button></div></div>
+    <div className="page-heading"><div><div className="eyebrow">BUSINESS UNIT OVERSIGHT</div><h1>Business units</h1><p>{businessUnitsLoading ? 'Loading mapping records…' : `${businessUnits.length} mapping records from XX_BU_LE_LEDGER_MAPPING.`}</p></div><div className="entity-page-actions"><button className="btn secondary add-bu-button" onClick={()=>openBusinessUnitEditor()}><CheckCircle2 size={16}/> Add business unit</button>{selectedBusinessUnitId && <button className="btn secondary" onClick={updateSelected}><CheckCircle2 size={16}/> Update mapping</button>}<button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export overview</button></div></div>
     {businessUnitLoadError && <div className="form-error business-unit-load-error" role="alert"><span>{businessUnitLoadError}</span><button className="btn secondary compact" onClick={reload} disabled={businessUnitsLoading}>Retry</button></div>}
-    {businessUnitsLoading && <div className="api-loading" role="status">Loading Business Units…</div>}
-    {!businessUnitsLoading && !businessUnitLoadError && businessUnitCards.length === 0 && <div className="empty-state">No Business Unit mapping records were found.</div>}
+    {businessUnitsLoading && <div className="api-loading" role="status">Loading Business Units from XX_BU_LE_LEDGER_MAPPING…</div>}
+    {!businessUnitsLoading && !businessUnitLoadError && businessUnitCards.length === 0 && <div className="empty-state">No Business Unit mapping records were found in XX_BU_LE_LEDGER_MAPPING.</div>}
     {!businessUnitsLoading && !businessUnitLoadError && <div className="entity-grid">{businessUnitCards.map(entity=>{
       const isSelected = selectedBusinessUnitId === entity.id;
       return <div key={entity.id} className="entity-card-wrap">
