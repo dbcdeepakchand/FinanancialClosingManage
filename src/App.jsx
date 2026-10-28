@@ -5,6 +5,7 @@ import {
   LayoutDashboard, ListChecks, Menu, PanelLeftClose, ShieldCheck, X
 } from 'lucide-react';
 import StatusPill from './components/StatusPill.jsx';
+import SearchableSelect from './components/SearchableSelect.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import ChecklistPage from './pages/ChecklistPage.jsx';
 import BusinessUnitsPage from './pages/BusinessUnitsPage.jsx';
@@ -17,10 +18,10 @@ const uploadTemplates = {
     label: 'Operational checklist',
     fileName: 'operational-checklist-template.csv',
     tableName: 'XX_OPERATIONAL_CHECKLIST',
-    required: 'BUSINESS_UNIT, STEP_DESCRIPTION',
+    required: 'LEDGER_NAME, PROCESS_NAME',
     columns: [
-      'MODULE_NAME', 'BUSINESS_UNIT', 'LEGAL_ENTITY', 'PROCESS_OWNER',
-      'STEP_DESCRIPTION', 'STEP_COMMENT', 'ACTION_BY', 'PRE_REQUISITE_DESC',
+      'MODULE_NAME', 'LEDGER_NAME', 'LEGAL_ENTITY', 'PROCESS_OWNER',
+      'PROCESS_NAME', 'PROCESS_DESCRIPTION', 'ACTION_BY', 'PRE_REQUISITE_DESC',
       'ACTION_TYPE', 'PROCESS_TYPE'
     ]
   },
@@ -146,6 +147,37 @@ function compareChecklistTasks(a, b) {
     a.entity.localeCompare(b.entity);
 }
 
+function formatPeriodKey(date) {
+  return `${String(date.getMonth() + 1).padStart(2, '0')}-${date.getFullYear()}`;
+}
+
+function formatPeriodInput(period) {
+  const numericMatch = period.match(/^(\d{2})-(\d{4})$/);
+  if (numericMatch) return `${numericMatch[2]}-${numericMatch[1]}`;
+
+  const legacyMatch = period.match(/^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)-(\d{4})$/);
+  if (!legacyMatch) return '';
+  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  return `${legacyMatch[2]}-${String(months.indexOf(legacyMatch[1]) + 1).padStart(2, '0')}`;
+}
+
+function parsePeriodInput(value) {
+  const match = value.match(/^(\d{4})-(0[1-9]|1[0-2])$/);
+  return match ? `${match[2]}-${match[1]}` : '';
+}
+
+function formatPeriodLabel(period) {
+  const numericMatch = period.match(/^(0[1-9]|1[0-2])-(\d{4})$/);
+  if (numericMatch) {
+    const month = new Intl.DateTimeFormat('en', { month: 'short' })
+      .format(new Date(Number(numericMatch[2]), Number(numericMatch[1]) - 1, 1))
+      .toUpperCase();
+    return `${month} ${numericMatch[2]}`;
+  }
+  const legacyMatch = period.match(/^([A-Z]{3})-(\d{4})$/);
+  return legacyMatch ? `${legacyMatch[1]} ${legacyMatch[2]}` : period;
+}
+
 export default function App() {
   const [tasks,setTasks] = useState([]);
   const [loading,setLoading] = useState(true);
@@ -153,7 +185,8 @@ export default function App() {
   const [reloadCount,setReloadCount] = useState(0);
   const [saving,setSaving] = useState(false);
   const [page,setPage] = useState('dashboard');
-  const [selectedLegalEntity,setSelectedLegalEntity] = useState('ALL');
+  const [selectedLedgerId,setSelectedLedgerId] = useState('');
+  const [selectedPeriod,setSelectedPeriod] = useState(() => formatPeriodKey(new Date()));
   const [selectedEntity,setSelectedEntity] = useState('ALL');
   const [search,setSearch] = useState('');
   const [statusFilter,setStatusFilter] = useState('All statuses');
@@ -177,16 +210,25 @@ export default function App() {
   const [businessUnitError,setBusinessUnitError] = useState('');
 
   useEffect(() => {
+    if (businessUnitsLoading || !selectedLedgerId) {
+      if (!businessUnitsLoading) setLoading(false);
+      return undefined;
+    }
+
     let cancelled = false;
     const loadTasks = async () => {
       setLoading(true);
+      setTasks([]);
       setApiError('');
       try {
-        const data = await apiRequest('/tasks');
-        if (!Array.isArray(data.tasks) || !Array.isArray(data.entities)) {
-          throw new Error('Application returned an unexpected checklist or business-unit response.');
+        const query = new URLSearchParams({ ledgerId: selectedLedgerId, period: selectedPeriod });
+        const data = await apiRequest(`/tasks?${query}`);
+        if (!Array.isArray(data.tasks) || !Array.isArray(data.periods)) {
+          throw new Error('Application returned an unexpected checklist or period response.');
         }
-        if (!cancelled) setTasks(data.tasks);
+        if (!cancelled) {
+          setTasks(data.tasks);
+        }
       } catch (error) {
         if (!cancelled) setApiError(`Could not load tasks from Application: ${error.message}`);
       } finally {
@@ -195,7 +237,7 @@ export default function App() {
     };
     loadTasks();
     return () => { cancelled = true; };
-  }, [reloadCount]);
+  }, [reloadCount, selectedLedgerId, selectedPeriod, businessUnitsLoading]);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -230,30 +272,38 @@ export default function App() {
     return () => { cancelled = true; };
   }, [reloadCount]);
 
-  const applicable = selectedLegalEntity === 'ALL'
-    ? tasks
-    : tasks.filter(task => task.legalEntityName === selectedLegalEntity);
-  const legalEntityNames = [...new Set([
-    ...tasks.map(task => task.legalEntityName),
-    ...businessUnits.map(record => record.LEGAL_ENTITY_NAME)
-  ].filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  const legalEntityOptions = legalEntityNames.map(name => ({
-    name,
-    businessUnitCount: new Set([
-      ...tasks.filter(task => task.legalEntityName === name).map(task => task.entity),
-      ...businessUnits.filter(record => record.LEGAL_ENTITY_NAME === name)
-        .map(record => record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID)
-    ]).size
+  useEffect(() => {
+    if (businessUnitsLoading) return;
+    if (businessUnits.length === 0) {
+      if (selectedLedgerId) setSelectedLedgerId('');
+      return;
+    }
+    const ledgerExists = businessUnits.some(record => record.LEDGER_ID === selectedLedgerId);
+    if (!ledgerExists) setSelectedLedgerId(businessUnits[0].LEDGER_ID);
+  }, [businessUnits, businessUnitsLoading, selectedLedgerId]);
+
+  const ledgerOptions = [...new Map(businessUnits
+    .filter(record => record.LEDGER_ID)
+    .map(record => [record.LEDGER_ID, { id: record.LEDGER_ID, name: record.LEDGER_NAME || record.LEDGER_ID }]))
+    .values()].sort((a, b) => a.name.localeCompare(b.name));
+  const applicable = tasks;
+  const searchableLedgerOptions = ledgerOptions.map(ledger => ({
+    value: ledger.id,
+    label: ledger.name,
+    detail: ledger.id,
+    searchText: ledger.id
   }));
-  const businessUnitOptions = [...new Map(applicable.map(task => [
-    task.businessUnitId,
-    { id: task.businessUnitId, name: task.entity }
-  ])).values()];
+  const businessUnitOptions = [...new Map(businessUnits
+    .filter(record => record.LEDGER_ID === selectedLedgerId)
+    .map(record => [
+      record.BUSINESS_UNIT_ID,
+      { id: record.BUSINESS_UNIT_ID, name: record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID }
+    ])).values()];
   const visibleTasks = useMemo(() => applicable.filter(task =>
     (selectedEntity === 'ALL' || task.businessUnitId === selectedEntity) &&
     (statusFilter === 'All statuses' || task.status === statusFilter) &&
     (moduleFilter === 'All modules' || task.module === moduleFilter) &&
-    [task.title,task.module,task.owner,task.entity,task.legalEntityName]
+    [task.title,task.processDescription,task.module,task.owner,task.entity,task.legalEntityName,task.ledgerName]
       .filter(Boolean).join(' ').toLowerCase().includes(search.toLowerCase())
   ).sort(compareChecklistTasks),[applicable,selectedEntity,statusFilter,moduleFilter,search]);
 
@@ -262,9 +312,7 @@ export default function App() {
   const blockedCount = applicable.filter(task=>task.status==='Blocked').length;
   const pendingCount = applicable.filter(task=>task.status==='Not started').length;
   const completion = applicable.length ? Math.round(completedCount/applicable.length*100) : 0;
-  const scopedBusinessUnits = businessUnits.filter(record =>
-    selectedLegalEntity === 'ALL' || record.LEGAL_ENTITY_NAME === selectedLegalEntity
-  );
+  const scopedBusinessUnits = businessUnits.filter(record => record.LEDGER_ID === selectedLedgerId);
   const mappingBusinessUnits = scopedBusinessUnits.map((record, index) => ({
     id: record.MAPPING_ID ? `mapping:${record.MAPPING_ID}` : `mapping:${record.BUSINESS_UNIT_ID}:${record.LEGAL_ENTITY_ID}:${record.LEDGER_ID}:${index}`,
     name: record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID || 'Unassigned',
@@ -272,8 +320,7 @@ export default function App() {
   }));
   const businessUnitCards = mappingBusinessUnits.map(entity=>{
     const list = applicable.filter(task =>
-      task.businessUnitId === entity.mappingRecord.BUSINESS_UNIT_NAME ||
-      task.entity === entity.mappingRecord.BUSINESS_UNIT_NAME
+      task.businessUnitId === entity.mappingRecord.BUSINESS_UNIT_ID
     );
     const done = list.filter(task=>task.status==='Complete').length;
     const inProgress = list.filter(task=>task.status==='In progress').length;
@@ -282,7 +329,7 @@ export default function App() {
   });
   const dashboardUnits = [
     ...scopedBusinessUnits.map(record => ({
-      id: record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID || 'Unassigned',
+      id: record.BUSINESS_UNIT_ID,
       name: record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID || 'Unassigned',
       legalEntityName: record.LEGAL_ENTITY_NAME
     })),
@@ -312,12 +359,15 @@ export default function App() {
     setSaving(true);
     setApiError('');
     try {
-      const savedTask = await apiRequest(`/tasks/${encodeURIComponent(detailTask.id)}`, {
+      const savedTask = await apiRequest(`/tasks/${encodeURIComponent(detailTask.checklistRowId)}`, {
         method: 'PATCH',
         body: JSON.stringify({
           status: detailTask.status,
           owner: detailTask.owner,
-          note: detailTask.note || ''
+          note: detailTask.note || '',
+          businessUnitId: detailTask.businessUnitId,
+          ledgerId: detailTask.ledgerId,
+          period: detailTask.period
         })
       });
       setTasks(previous=>previous.map(task=>task.id===savedTask.id?{...task,...savedTask}:task));
@@ -433,9 +483,9 @@ export default function App() {
   };
 
   const exportCsv = () => {
-    const rows = [['CHECKLIST_ROW_ID','MODULE_NAME','BUSINESS_UNIT','LEGAL_ENTITY','PROCESS_OWNER','STEP_DESCRIPTION','STEP_COMMENT','ACTION_BY','PRE_REQUISITE_DESC','ACTION_TYPE','PROCESS_TYPE','STATUS','ASSIGNED_USER','WORKFLOW_COMMENT']];
+    const rows = [['CHECKLIST_ROW_ID','MODULE_NAME','LEDGER_NAME','BUSINESS_UNIT_ID','BUSINESS_UNIT_NAME','LEGAL_ENTITY','PROCESS_OWNER','PROCESS_NAME','PROCESS_DESCRIPTION','ACTION_BY','PRE_REQUISITE_DESC','ACTION_TYPE','PROCESS_TYPE','PERIOD','STATUS','ASSIGNED_USER','WORKFLOW_COMMENT']];
     visibleTasks.forEach(task=>{
-      rows.push([task.checklistRowId,task.moduleName,task.entity,task.legalEntityName,task.processOwner,task.title,task.stepComment,task.actionBy,task.prerequisiteDescription,task.actionType,task.processType,task.status,task.owner,task.note||'']);
+      rows.push([task.checklistRowId,task.moduleName,task.ledgerName,task.businessUnitId,task.entity,task.legalEntityName,task.processOwner,task.title,task.processDescription,task.actionBy,task.prerequisiteDescription,task.actionType,task.processType,selectedPeriod,task.status,task.owner,task.note||'']);
     });
     const csv = rows.map(row=>row.map(value=>`"${String(value??'').replaceAll('"','""')}"`).join(',')).join('\n');
     const blob = new Blob([csv],{type:'text/csv;charset=utf-8;'});
@@ -481,8 +531,49 @@ export default function App() {
     <main className="main-area">
       <header className="topbar">
         <div className="topbar-left"><button className="icon-btn mobile-menu" aria-label="Toggle navigation" aria-expanded={window.matchMedia('(max-width: 720px)').matches ? mobileNav : !sidebarCollapsed} onClick={()=>{if(window.matchMedia('(max-width: 720px)').matches){setMobileNav(open=>!open);}else{setSidebarCollapsed(collapsed=>!collapsed);}}}><Menu size={20}/></button><span className="breadcrumb">Finance Operations</span><ChevronRight size={14}/><strong>{pageTitle}</strong></div>
-        {selectedLegalEntity !== 'ALL' && <div className="selected-entity-context"><span>LEGAL ENTITY</span><strong>{selectedLegalEntity}</strong></div>}
+        <div className="topbar-right period-controls">
+          <SearchableSelect
+            label="LEDGER"
+            ariaLabel="Ledger"
+            options={searchableLedgerOptions}
+            value={selectedLedgerId}
+            onChange={ledgerId=>{setSelectedLedgerId(ledgerId);setSelectedEntity('ALL');setDetailTask(null);}}
+            placeholder={businessUnitsLoading
+              ? 'Loading ledgers...'
+              : businessUnitLoadError
+                ? 'Could not load ledgers'
+                : ledgerOptions.length
+                  ? 'Search ledger...'
+                  : 'No ledger mappings'}
+            disabled={businessUnitsLoading || ledgerOptions.length===0}
+          />
+          <label className="period-select month-period-select">
+            <span>PERIOD</span>
+            <input
+              type="month"
+              aria-label="Period"
+              value={formatPeriodInput(selectedPeriod)}
+              onChange={event => {
+                const period = parsePeriodInput(event.target.value);
+                if (period) {
+                  setSelectedPeriod(period);
+                  setDetailTask(null);
+                }
+              }}
+            />
+          </label>
+        </div>
       </header>
+
+      {businessUnitLoadError
+        ? <div className="ledger-notice ledger-notice-error" role="alert">
+          <span>{businessUnitLoadError}</span>
+          <button className="btn secondary compact" onClick={()=>setReloadCount(count=>count+1)} disabled={businessUnitsLoading}>Retry</button>
+        </div>
+        : !businessUnitsLoading && ledgerOptions.length===0 && <div className="ledger-notice" role="status">
+          <span>No ledger mappings are available. Upload Business Unit mappings to select a ledger and load checklist tasks.</span>
+          <button className="btn secondary compact" onClick={()=>{setDataSource('mapping');setPage('dataSource');}}>Upload Business Units</button>
+        </div>}
 
       {apiError && <div className="api-error" role="alert"><span>{apiError}</span><button className="btn secondary compact" onClick={()=>setReloadCount(count=>count+1)} disabled={loading}>Retry</button></div>}
       {loading && <div className="api-loading" role="status">Connecting to Application and loading close tasks…</div>}
@@ -491,8 +582,8 @@ export default function App() {
           completion={completion} completedCount={completedCount}
           inProgressCount={inProgressCount} blockedCount={blockedCount} pendingCount={pendingCount}
           fullyClosed={fullyClosed} moduleCount={modules.length} entityStats={entityStats}
-          legalEntityOptions={legalEntityOptions} selectedLegalEntity={selectedLegalEntity}
-          onSelectLegalEntity={name=>{setSelectedLegalEntity(name);setSelectedEntity('ALL');}}
+          selectedLedger={ledgerOptions.find(ledger=>ledger.id===selectedLedgerId)?.name || ''}
+          selectedPeriod={formatPeriodLabel(selectedPeriod)}
           applicable={applicable} onGoChecklist={()=>setPage('checklist')}
           onSelectEntity={id=>{setSelectedEntity(id);setPage('checklist');}}
           onViewEntities={()=>setPage('entities')} onOpenTask={task=>setDetailTask(task)}
@@ -500,6 +591,7 @@ export default function App() {
         {page==='checklist' && <ChecklistPage
           completedCount={completedCount} inProgressCount={inProgressCount}
           pendingCount={pendingCount} blockedCount={blockedCount} exportCsv={exportCsv}
+          selectedPeriod={formatPeriodLabel(selectedPeriod)}
           search={search} setSearch={setSearch} selectedEntity={selectedEntity}
           setSelectedEntity={setSelectedEntity} businessUnitOptions={businessUnitOptions}
           statusFilter={statusFilter} setStatusFilter={setStatusFilter}
@@ -534,8 +626,10 @@ export default function App() {
       <div className="drawer-body">
         {apiError && <p className="form-error" role="alert">{apiError}</p>}
         <span className="module-chip">{detailTask.module}</span><h3 className="drawer-task-title">{detailTask.title}</h3><div className="drawer-status-row"><StatusPill status={detailTask.status}/></div>
+        <label className="field-label">Ledger</label><p>{detailTask.ledgerName}</p>
         <label className="field-label">Business unit</label><p>{detailTask.entity}</p>
         {detailTask.legalEntityName && <><label className="field-label">Legal entity</label><p>{detailTask.legalEntityName}</p></>}
+        {detailTask.processDescription && <><label className="field-label">Process description</label><p>{detailTask.processDescription}</p></>}
         {detailTask.processOwner && <><label className="field-label">Source process owner</label><p>{detailTask.processOwner}</p></>}
         {detailTask.actionBy && <><label className="field-label">Action by</label><p>{detailTask.actionBy}</p></>}
         <label className="field-label">Task status</label><select className="field-control" value={detailTask.status} onChange={event=>updateTask(detailTask.id,{status:event.target.value})}><option>Not started</option><option>In progress</option><option>Blocked</option><option>Complete</option></select>

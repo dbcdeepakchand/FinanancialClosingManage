@@ -5,12 +5,13 @@ import StatusPill from '../components/StatusPill.jsx';
 
 export default function ChecklistPage({
   completedCount, inProgressCount, pendingCount, blockedCount, exportCsv,
+  selectedPeriod,
   search, setSearch, selectedEntity, setSelectedEntity, businessUnitOptions,
   statusFilter, setStatusFilter, moduleFilter, setModuleFilter, modules,
   visibleTasks, applicable, onOpenTask
 }) {
   return <section className="page-section">
-    <div className="page-heading"><div><div className="eyebrow">CLOSE EXECUTION</div><h1>Operational checklist</h1><p>Checklist activities are assigned directly to the business unit and legal entity in each source row.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export</button></div>
+    <div className="page-heading"><div><div className="eyebrow">CLOSE EXECUTION · {selectedPeriod}</div><h1>Operational checklist</h1><p>Ledger-based checklist activities are associated with business units mapped to the selected ledger.</p></div><button className="btn secondary" onClick={exportCsv}><Download size={16}/> Export</button></div>
     <div className="inline-summary"><div><span className="summary-dot green"/><strong>{completedCount}</strong><span>Complete</span></div><div><span className="summary-dot blue"/><strong>{inProgressCount}</strong><span>In progress</span></div><div><span className="summary-dot amber"/><strong>{pendingCount}</strong><span>Not started</span></div><div><span className="summary-dot red"/><strong>{blockedCount}</strong><span>Blocked</span></div></div>
     <div className="table-card">
       <div className="table-toolbar"><div className="search-box"><Search size={16}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search activities, owners, units..."/></div><div className="toolbar-filters"><select value={selectedEntity} onChange={e=>setSelectedEntity(e.target.value)}><option value="ALL">All business units</option>{businessUnitOptions.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select><select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option>All statuses</option><option>Not started</option><option>In progress</option><option>Blocked</option><option>Complete</option></select><select value={moduleFilter} onChange={e=>setModuleFilter(e.target.value)}><option>All modules</option>{modules.map(m=><option key={m}>{m}</option>)}</select></div></div>

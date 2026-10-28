@@ -19,15 +19,31 @@ const host = process.env.HOST || '127.0.0.1';
 const maxRequestBytes = 5 * 1024 * 1024;
 const maxImportRows = 5000;
 const statuses = new Set(['Not started', 'In progress', 'Blocked', 'Complete']);
+const monthNames = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+function toLegacyPeriod(period) {
+  const match = period.match(/^(0[1-9]|1[0-2])-(\d{4})$/);
+  return match ? `${monthNames[Number(match[1]) - 1]}-${match[2]}` : period;
+}
+
+function normalizePeriod(period) {
+  const numericMatch = period.match(/^(0[1-9]|1[0-2])-(\d{4})$/);
+  if (numericMatch) return period;
+  const legacyMatch = period.match(/^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)-(\d{4})$/);
+  return legacyMatch
+    ? `${String(monthNames.indexOf(legacyMatch[1]) + 1).padStart(2, '0')}-${legacyMatch[2]}`
+    : period;
+}
+
 const importSources = {
   checklist: {
     table: 'XX_OPERATIONAL_CHECKLIST',
     columns: [
-      'MODULE_NAME', 'BUSINESS_UNIT', 'LEGAL_ENTITY', 'PROCESS_OWNER',
-      'STEP_DESCRIPTION', 'STEP_COMMENT', 'ACTION_BY', 'PRE_REQUISITE_DESC',
+      'MODULE_NAME', 'LEDGER_NAME', 'LEGAL_ENTITY', 'PROCESS_OWNER',
+      'PROCESS_NAME', 'PROCESS_DESCRIPTION', 'ACTION_BY', 'PRE_REQUISITE_DESC',
       'ACTION_TYPE', 'PROCESS_TYPE'
     ],
-    required: ['BUSINESS_UNIT', 'STEP_DESCRIPTION']
+    required: ['LEDGER_NAME', 'PROCESS_NAME']
   },
   mapping: {
     table: 'XX_BU_LE_LEDGER_MAPPING',
@@ -47,6 +63,8 @@ const importSources = {
 const progressBindDefs = {
   checklistId: { type: oracledb.STRING, maxSize: 100 },
   businessUnitId: { type: oracledb.STRING, maxSize: 255 },
+  ledgerId: { type: oracledb.STRING, maxSize: 255 },
+  period: { type: oracledb.STRING, maxSize: 10 },
   status: { type: oracledb.STRING, maxSize: 30 },
   owner: { type: oracledb.STRING, maxSize: 150 },
   note: { type: oracledb.STRING, maxSize: 4000 }
@@ -60,9 +78,11 @@ class HttpError extends Error {
 }
 
 function mapTask(row) {
+  const taskId = [row.CHECKLIST_ROW_ID, row.BUSINESS_UNIT_ID, row.LEDGER_ID, row.PERIOD]
+    .join('|');
   return {
-    id: row.CHECKLIST_ROW_ID,
-    checklistRowId: row.CHECKLIST_ROW_ID,
+    id: taskId,
+    checklistRowId: String(row.CHECKLIST_ROW_ID),
     title: row.STEP_DESCRIPTION,
     moduleName: row.MODULE_NAME,
     module: row.MODULE_NAME || 'Uncategorized',
@@ -70,57 +90,79 @@ function mapTask(row) {
     owner: row.OWNER_NAME || 'Unassigned',
     actionBy: row.ACTION_BY,
     prerequisiteDescription: row.PRE_REQUISITE_DESC,
-    stepComment: row.STEP_COMMENT,
+    processDescription: row.PROCESS_DESCRIPTION,
     actionType: row.ACTION_TYPE,
     processType: row.PROCESS_TYPE,
-    businessUnitId: row.BUSINESS_UNIT_ID,
+    businessUnitId: String(row.BUSINESS_UNIT_ID),
     entity: row.BUSINESS_UNIT,
     legalEntityName: row.LEGAL_ENTITY,
+    ledgerId: String(row.LEDGER_ID),
+    ledgerName: row.LEDGER_NAME,
+    period: row.PERIOD,
     status: row.STATUS,
     note: row.NOTE || ''
   };
 }
 
-async function readTasks(connection) {
+async function readTasks(connection, ledgerId, period) {
   const result = await connection.execute(
     `SELECT TO_CHAR(checklist.CHECKLIST_ROW_ID) AS CHECKLIST_ROW_ID,
             checklist.MODULE_NAME,
-            NVL(checklist.BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT,
-            checklist.LEGAL_ENTITY,
-            NVL(checklist.BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT_ID,
-            checklist.PROCESS_OWNER, checklist.STEP_DESCRIPTION,
-            checklist.STEP_COMMENT, checklist.ACTION_BY,
+            mapping.BUSINESS_UNIT_ID,
+            mapping.BUSINESS_UNIT_NAME AS BUSINESS_UNIT,
+            NVL(checklist.LEGAL_ENTITY, mapping.LEGAL_ENTITY_NAME) AS LEGAL_ENTITY,
+            mapping.LEDGER_ID,
+            mapping.LEDGER_NAME,
+            checklist.PROCESS_OWNER,
+            checklist.PROCESS_NAME AS STEP_DESCRIPTION,
+            checklist.PROCESS_DESCRIPTION,
+            checklist.ACTION_BY,
             checklist.PRE_REQUISITE_DESC, checklist.ACTION_TYPE,
             checklist.PROCESS_TYPE,
             NVL(progress.STATUS, 'Not started') AS STATUS,
             NVL(progress.OWNER_NAME,
                 NVL(checklist.ACTION_BY, checklist.PROCESS_OWNER)) AS OWNER_NAME,
             CASE WHEN progress.NOTE_OVERRIDDEN = 'Y' THEN progress.NOTE
-                 ELSE checklist.STEP_COMMENT END AS NOTE
+                 ELSE NULL END AS NOTE,
+            :period AS PERIOD
        FROM XX_OPERATIONAL_CHECKLIST checklist
+       JOIN XX_BU_LE_LEDGER_MAPPING mapping
+         ON mapping.LEDGER_ID = :ledgerId
+        AND UPPER(TRIM(mapping.LEDGER_NAME)) = UPPER(TRIM(checklist.LEDGER_NAME))
        LEFT JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS progress
          ON progress.CHECKLIST_ROW_ID = TO_CHAR(checklist.CHECKLIST_ROW_ID)
-        AND progress.BUSINESS_UNIT_ID = NVL(checklist.BUSINESS_UNIT, 'Unassigned')
-      ORDER BY checklist.CHECKLIST_ROW_ID ASC, checklist.BUSINESS_UNIT ASC`,
-    [],
+        AND progress.BUSINESS_UNIT_ID = mapping.BUSINESS_UNIT_ID
+        AND progress.LEDGER = mapping.LEDGER_ID
+        AND (
+          progress.PERIOD = :period
+          OR (
+            progress.PERIOD = :legacyPeriod
+            AND NOT EXISTS (
+              SELECT 1
+                FROM XX_OPERATIONAL_CHECKLIST_PROGRESS preferred
+               WHERE preferred.CHECKLIST_ROW_ID = progress.CHECKLIST_ROW_ID
+                 AND preferred.BUSINESS_UNIT_ID = progress.BUSINESS_UNIT_ID
+                 AND preferred.LEDGER = progress.LEDGER
+                 AND preferred.PERIOD = :period
+            )
+          )
+        )
+      ORDER BY checklist.CHECKLIST_ROW_ID ASC, mapping.BUSINESS_UNIT_NAME ASC`,
+    { ledgerId, period, legacyPeriod: toLegacyPeriod(period) },
     { outFormat: oracledb.OUT_FORMAT_OBJECT }
   );
-  return result.rows.map(mapTask);
-}
-
-async function readEntities(connection) {
-  const result = await connection.execute(
-    `SELECT DISTINCT
-            NVL(BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT_NAME
-       FROM XX_OPERATIONAL_CHECKLIST
-      ORDER BY BUSINESS_UNIT_NAME`,
-    [],
+  const periods = await connection.execute(
+    `SELECT DISTINCT PERIOD
+       FROM XX_OPERATIONAL_CHECKLIST_PROGRESS
+      WHERE LEDGER = :ledgerId
+      ORDER BY PERIOD DESC`,
+    { ledgerId },
     { outFormat: oracledb.OUT_FORMAT_OBJECT }
   );
-  return result.rows.map(row => ({
-    id: row.BUSINESS_UNIT_NAME,
-    name: row.BUSINESS_UNIT_NAME
-  }));
+  return {
+    tasks: result.rows.map(mapTask),
+    periods: [...new Set(periods.rows.map(row => normalizePeriod(row.PERIOD)))]
+  };
 }
 
 async function readBusinessUnits(connection) {
@@ -143,11 +185,11 @@ async function readBusinessUnits(connection) {
 
   return result.rows.map(row => ({
     MAPPING_ID: row.MAPPING_ID == null ? '' : String(row.MAPPING_ID),
-    BUSINESS_UNIT_ID: row.BUSINESS_UNIT_ID || '',
+    BUSINESS_UNIT_ID: row.BUSINESS_UNIT_ID == null ? '' : String(row.BUSINESS_UNIT_ID),
     BUSINESS_UNIT_NAME: row.BUSINESS_UNIT_NAME || '',
     LEGAL_ENTITY_ID: row.LEGAL_ENTITY_ID || '',
     LEGAL_ENTITY_NAME: row.LEGAL_ENTITY_NAME || '',
-    LEDGER_ID: row.LEDGER_ID || '',
+    LEDGER_ID: row.LEDGER_ID == null ? '' : String(row.LEDGER_ID),
     LEDGER_NAME: row.LEDGER_NAME || '',
     CURRENCY_CODE: row.CURRENCY_CODE || '',
     CUTOFF_DATE: row.CUTOFF_DATE || '',
@@ -259,11 +301,18 @@ async function main() {
       }
 
       if (request.method === 'GET' && url.pathname === '/api/tasks') {
+        const ledgerId = url.searchParams.get('ledgerId') || '';
+        const period = url.searchParams.get('period') || '';
+        if (!ledgerId || ledgerId.length > 255) {
+          throw new HttpError(400, 'A valid ledgerId is required.');
+        }
+        if (!/^(0[1-9]|1[0-2])-\d{4}$/.test(period)) {
+          throw new HttpError(400, 'Period must use the MM-YYYY format.');
+        }
         const connection = await pool.getConnection();
         try {
-          const tasks = await readTasks(connection);
-          const entities = await readEntities(connection);
-          sendJson(response, 200, { tasks, entities });
+          const result = await readTasks(connection, ledgerId, period);
+          sendJson(response, 200, result);
         } finally {
           await connection.close();
         }
@@ -517,12 +566,20 @@ async function main() {
         const { checklistId } = parseTaskId(decodeURIComponent(taskMatch[1]));
         const patch = await readRequestBody(request);
         if (!patch || typeof patch !== 'object' || Array.isArray(patch) ||
-            Object.keys(patch).some(key => !['status', 'owner', 'note'].includes(key)) ||
-            !Object.hasOwn(patch, 'status') || !Object.hasOwn(patch, 'owner') || !Object.hasOwn(patch, 'note')) {
-          throw new HttpError(400, 'Updates must include status, owner, and note only.');
+            Object.keys(patch).some(key => !['status', 'owner', 'note', 'businessUnitId', 'ledgerId', 'period'].includes(key)) ||
+            !['status', 'owner', 'note', 'businessUnitId', 'ledgerId', 'period'].every(key => Object.hasOwn(patch, key))) {
+          throw new HttpError(400, 'Updates must include task status, owner, note, business unit, ledger and period.');
         }
         if (!statuses.has(patch.status)) {
           throw new HttpError(400, 'Task status is invalid.');
+        }
+        if (typeof patch.businessUnitId !== 'string' || !patch.businessUnitId.trim() || patch.businessUnitId.length > 255 ||
+            typeof patch.ledgerId !== 'string' || !patch.ledgerId.trim() || patch.ledgerId.length > 255) {
+          throw new HttpError(400, 'Business unit and ledger identifiers are required.');
+        }
+        if (typeof patch.period !== 'string' ||
+            !/^(0[1-9]|1[0-2])-\d{4}$/.test(patch.period)) {
+          throw new HttpError(400, 'Period must use the MM-YYYY format.');
         }
         if (typeof patch.owner !== 'string' || !patch.owner.trim() || patch.owner.trim().length > 150) {
           throw new HttpError(400, 'Task owner is required and must be at most 150 characters.');
@@ -533,16 +590,26 @@ async function main() {
         const connection = await pool.getConnection();
         try {
           const source = await connection.execute(
-            `SELECT NVL(BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT_ID
-               FROM XX_OPERATIONAL_CHECKLIST
-              WHERE TO_CHAR(CHECKLIST_ROW_ID) = :checklistId`,
-            { checklistId },
+            `SELECT mapping.BUSINESS_UNIT_ID
+               FROM XX_OPERATIONAL_CHECKLIST checklist
+               JOIN XX_BU_LE_LEDGER_MAPPING mapping
+                 ON mapping.LEDGER_ID = :ledgerId
+                AND mapping.BUSINESS_UNIT_ID = :businessUnitId
+                AND UPPER(TRIM(mapping.LEDGER_NAME)) = UPPER(TRIM(checklist.LEDGER_NAME))
+              WHERE TO_CHAR(checklist.CHECKLIST_ROW_ID) = :checklistId`,
+            {
+              checklistId,
+              businessUnitId: patch.businessUnitId.trim(),
+              ledgerId: patch.ledgerId.trim()
+            },
             { outFormat: oracledb.OUT_FORMAT_OBJECT }
           );
           if (source.rows.length === 0) throw new HttpError(404, 'Checklist task not found.');
           const progress = {
             checklistId,
             businessUnitId: source.rows[0].BUSINESS_UNIT_ID,
+            ledgerId: patch.ledgerId.trim(),
+            period: patch.period,
             status: patch.status,
             owner: patch.owner.trim(),
             note: patch.note
@@ -551,11 +618,15 @@ async function main() {
             `MERGE INTO XX_OPERATIONAL_CHECKLIST_PROGRESS target
              USING (
                SELECT :checklistId AS CHECKLIST_ROW_ID,
-                      :businessUnitId AS BUSINESS_UNIT_ID
+                      :businessUnitId AS BUSINESS_UNIT_ID,
+                      :ledgerId AS LEDGER,
+                      :period AS PERIOD
                  FROM DUAL
              ) source
                 ON (target.CHECKLIST_ROW_ID = source.CHECKLIST_ROW_ID
-                    AND target.BUSINESS_UNIT_ID = source.BUSINESS_UNIT_ID)
+                    AND target.BUSINESS_UNIT_ID = source.BUSINESS_UNIT_ID
+                    AND target.LEDGER = source.LEDGER
+                    AND target.PERIOD = source.PERIOD)
              WHEN MATCHED THEN UPDATE SET
                target.STATUS = :status,
                target.OWNER_NAME = :owner,
@@ -563,34 +634,18 @@ async function main() {
                target.NOTE_OVERRIDDEN = 'Y',
                target.UPDATED_AT = SYSTIMESTAMP
              WHEN NOT MATCHED THEN INSERT
-               (CHECKLIST_ROW_ID, BUSINESS_UNIT_ID, STATUS, OWNER_NAME, NOTE, NOTE_OVERRIDDEN)
+               (CHECKLIST_ROW_ID, BUSINESS_UNIT_ID, LEDGER, STATUS, OWNER_NAME, PERIOD, NOTE, NOTE_OVERRIDDEN)
                VALUES
-               (:checklistId, :businessUnitId, :status, :owner, :note, 'Y')`,
+               (:checklistId, :businessUnitId, :ledgerId, :status, :owner, :period, :note, 'Y')`,
             progress,
             { bindDefs: progressBindDefs, autoCommit: true }
           );
-          const updated = await connection.execute(
-            `SELECT TO_CHAR(checklist.CHECKLIST_ROW_ID) AS CHECKLIST_ROW_ID,
-                    NVL(checklist.BUSINESS_UNIT, 'Unassigned') AS BUSINESS_UNIT_ID,
-                    NVL(progress.STATUS, 'Not started') AS STATUS,
-                    NVL(progress.OWNER_NAME,
-                        NVL(checklist.ACTION_BY, checklist.PROCESS_OWNER)) AS OWNER_NAME,
-                    CASE WHEN progress.NOTE_OVERRIDDEN = 'Y' THEN progress.NOTE
-                         ELSE checklist.STEP_COMMENT END AS NOTE
-               FROM XX_OPERATIONAL_CHECKLIST checklist
-               LEFT JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS progress
-                 ON progress.CHECKLIST_ROW_ID = TO_CHAR(checklist.CHECKLIST_ROW_ID)
-                AND progress.BUSINESS_UNIT_ID = NVL(checklist.BUSINESS_UNIT, 'Unassigned')
-              WHERE TO_CHAR(checklist.CHECKLIST_ROW_ID) = :checklistId`,
-            { checklistId },
-            { outFormat: oracledb.OUT_FORMAT_OBJECT }
-          );
-          const task = updated.rows[0];
+          const taskId = [checklistId, progress.businessUnitId, progress.ledgerId, progress.period].join('|');
           sendJson(response, 200, {
-            id: task.CHECKLIST_ROW_ID,
-            status: task.STATUS,
-            owner: task.OWNER_NAME,
-            note: task.NOTE || ''
+            id: taskId,
+            status: progress.status,
+            owner: progress.owner,
+            note: progress.note
           });
         } finally {
           await connection.close();

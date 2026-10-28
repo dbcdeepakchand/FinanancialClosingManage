@@ -13,8 +13,8 @@ function compareChecklistTasks(a, b) {
 
 export default function DashboardPage({
   completion, completedCount, inProgressCount, blockedCount, pendingCount,
-  fullyClosed, moduleCount, entityStats, applicable, legalEntityOptions,
-  selectedLegalEntity, onSelectLegalEntity, onGoChecklist, onSelectEntity,
+  fullyClosed, moduleCount, entityStats, applicable,
+  selectedLedger, selectedPeriod, onGoChecklist, onSelectEntity,
   onViewEntities, onOpenTask
 }) {
   const openTasks = applicable.filter(task=>task.status!=='Complete');
@@ -24,8 +24,8 @@ export default function DashboardPage({
     .slice(0,5);
 
   return <section className="page-section">
-    <div className="welcome-row"><div><div className="eyebrow">GROUP FINANCE / CLOSE MANAGEMENT</div><h1>Operational checklist overview</h1>{selectedLegalEntity !== 'ALL' && <p>Activity status across {selectedLegalEntity}.</p>}</div><div className="welcome-actions"><label className="legal-entity-lov"><select aria-label="Legal entity / business unit" value={selectedLegalEntity} onChange={event=>onSelectLegalEntity(event.target.value)}><option value="ALL">All legal entities / business units</option>{legalEntityOptions.map(entity=><option key={entity.name} value={entity.name}>{entity.name} ({entity.businessUnitCount} business units)</option>)}</select></label><button className="btn primary" onClick={onGoChecklist}><ListChecks size={16}/> Open checklist</button></div></div>
-    <div className="callout"><div className="callout-icon"><Sparkles size={19}/></div><div className="callout-copy"><strong>Checklist overview</strong>{selectedLegalEntity !== 'ALL' && <p>{completion}% of {applicable.length} checklist activities are complete for <b>{selectedLegalEntity}</b>. <b>{blockedCount} activities</b> are blocked and need review.</p>}</div><button className="callout-link" onClick={onGoChecklist}>Review tasks <ArrowUpRight size={14}/></button></div>
+    <div className="welcome-row"><div><div className="eyebrow">GROUP FINANCE / CLOSE MANAGEMENT</div><h1>Operational checklist overview</h1><p>{selectedLedger ? <>Ledger <strong>{selectedLedger}</strong> · Period <strong>{selectedPeriod}</strong></> : 'Select a ledger to view its close activities.'}</p></div><div className="welcome-actions"><button className="btn primary" onClick={onGoChecklist}><ListChecks size={16}/> Open checklist</button></div></div>
+    <div className="callout"><div className="callout-icon"><Sparkles size={19}/></div><div className="callout-copy"><strong>Selected-period overview</strong><p>{completion}% of {applicable.length} checklist activities are complete for <b>{selectedLedger || 'the selected ledger'}</b> in <b>{selectedPeriod}</b>. <b>{blockedCount} activities</b> are blocked and need review.</p></div><button className="callout-link" onClick={onGoChecklist}>Review tasks <ArrowUpRight size={14}/></button></div>
     <div className="stats-grid dashboard-stats-grid">
       <StatCard label="Checklist completion" value={`${completion}%`} sub={`${completedCount} of ${applicable.length} activities complete`} icon={ChartNoAxesCombined} tone="blue"/>
       <StatCard label="Business units fully closed" value={`${fullyClosed} / ${entityStats.length}`} sub="All source checklist rows complete" icon={ShieldCheck} tone="green"/>
