@@ -14,7 +14,7 @@ const { createServer } = require('http');
 //const root = path.dirname(fileURLToPath(import.meta.url));
 const root = __dirname;
 const distDirectory = path.join(root, 'dist');
-const port = Number(process.env.PORT || 3001);
+const port = Number(process.env.PORT || 3002);
 const host = process.env.HOST || '127.0.0.1';
 const maxRequestBytes = 5 * 1024 * 1024;
 const maxImportRows = 5000;
@@ -39,10 +39,11 @@ const importSources = {
   checklist: {
     table: 'XX_OPERATIONAL_CHECKLIST',
     columns: [
-      'MODULE_NAME', 'LEDGER_NAME', 'LEGAL_ENTITY', 'PROCESS_OWNER',
+      'MODULE_NAME', 'LEDGER_NAME', 'PROCESS_OWNER',
       'PROCESS_NAME', 'PROCESS_DESCRIPTION', 'ACTION_BY', 'PRE_REQUISITE_DESC',
       'ACTION_TYPE', 'PROCESS_TYPE'
     ],
+    legacyColumns: ['LEGAL_ENTITY'],
     required: ['LEDGER_NAME', 'PROCESS_NAME']
   },
   mapping: {
@@ -110,7 +111,7 @@ async function readTasks(connection, ledgerId, period) {
             checklist.MODULE_NAME,
             mapping.BUSINESS_UNIT_ID,
             mapping.BUSINESS_UNIT_NAME AS BUSINESS_UNIT,
-            NVL(checklist.LEGAL_ENTITY, mapping.LEGAL_ENTITY_NAME) AS LEGAL_ENTITY,
+            mapping.LEGAL_ENTITY_NAME AS LEGAL_ENTITY,
             mapping.LEDGER_ID,
             mapping.LEDGER_NAME,
             checklist.PROCESS_OWNER,
@@ -128,7 +129,10 @@ async function readTasks(connection, ledgerId, period) {
        FROM XX_OPERATIONAL_CHECKLIST checklist
        JOIN XX_BU_LE_LEDGER_MAPPING mapping
          ON mapping.LEDGER_ID = :ledgerId
-        AND UPPER(TRIM(mapping.LEDGER_NAME)) = UPPER(TRIM(checklist.LEDGER_NAME))
+        AND (
+          UPPER(TRIM(mapping.LEDGER_NAME)) = UPPER(TRIM(checklist.LEDGER_NAME))
+          OR UPPER(TRIM(TO_CHAR(mapping.LEDGER_ID))) = UPPER(TRIM(checklist.LEDGER_NAME))
+        )
        LEFT JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS progress
          ON progress.CHECKLIST_ROW_ID = TO_CHAR(checklist.CHECKLIST_ROW_ID)
         AND progress.BUSINESS_UNIT_ID = mapping.BUSINESS_UNIT_ID
@@ -456,10 +460,13 @@ async function main() {
         }
 
         const rows = body.rows.map((row, index) => {
+          const legacyColumns = (source.legacyColumns || [])
+            .filter(column => Object.hasOwn(row || {}, column));
+          const acceptedColumns = [...source.columns, ...legacyColumns];
           if (!row || typeof row !== 'object' || Array.isArray(row) ||
-              Object.keys(row).length !== source.columns.length ||
+              Object.keys(row).length !== acceptedColumns.length ||
               source.columns.some(column => !Object.hasOwn(row, column)) ||
-              Object.keys(row).some(column => !source.columns.includes(column))) {
+              Object.keys(row).some(column => !acceptedColumns.includes(column))) {
             throw new HttpError(400, `Row ${index + 1} does not match the supported template columns.`);
           }
 
@@ -595,7 +602,10 @@ async function main() {
                JOIN XX_BU_LE_LEDGER_MAPPING mapping
                  ON mapping.LEDGER_ID = :ledgerId
                 AND mapping.BUSINESS_UNIT_ID = :businessUnitId
-                AND UPPER(TRIM(mapping.LEDGER_NAME)) = UPPER(TRIM(checklist.LEDGER_NAME))
+                AND (
+                  UPPER(TRIM(mapping.LEDGER_NAME)) = UPPER(TRIM(checklist.LEDGER_NAME))
+                  OR UPPER(TRIM(TO_CHAR(mapping.LEDGER_ID))) = UPPER(TRIM(checklist.LEDGER_NAME))
+                )
               WHERE TO_CHAR(checklist.CHECKLIST_ROW_ID) = :checklistId`,
             {
               checklistId,

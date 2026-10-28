@@ -20,7 +20,7 @@ const uploadTemplates = {
     tableName: 'XX_OPERATIONAL_CHECKLIST',
     required: 'LEDGER_NAME, PROCESS_NAME',
     columns: [
-      'MODULE_NAME', 'LEDGER_NAME', 'LEGAL_ENTITY', 'PROCESS_OWNER',
+      'MODULE_NAME', 'LEDGER_NAME', 'PROCESS_OWNER',
       'PROCESS_NAME', 'PROCESS_DESCRIPTION', 'ACTION_BY', 'PRE_REQUISITE_DESC',
       'ACTION_TYPE', 'PROCESS_TYPE'
     ]
@@ -50,7 +50,7 @@ const emptyBusinessUnit = {
   LEDGER_ID: '', LEDGER_NAME: '', CURRENCY_CODE: '', CUTOFF_DATE: '', DUE_DAYS: ''
 };
 
-function parseCsv(text, expectedColumns) {
+function parseCsv(text, expectedColumns, legacyColumns = []) {
   const records = [];
   let row = [];
   let value = '';
@@ -90,17 +90,24 @@ function parseCsv(text, expectedColumns) {
   const headers = records[0].map((header, index) =>
     (index === 0 ? header.replace(/^\uFEFF/, '') : header).trim()
   );
-  if (headers.length !== expectedColumns.length ||
-      new Set(headers).size !== expectedColumns.length ||
+  const hasLegacyColumns = legacyColumns.length > 0 &&
+    headers.length === expectedColumns.length + legacyColumns.length &&
+    legacyColumns.every(column => headers.includes(column));
+  if ((!hasLegacyColumns && headers.length !== expectedColumns.length) ||
+      new Set(headers).size !== headers.length ||
       expectedColumns.some(column => !headers.includes(column))) {
     throw new Error('The header row does not match the selected data-source template.');
   }
+  const rowColumns = headers.filter(header => !legacyColumns.includes(header));
 
   const rows = records.slice(1).map((cells, index) => {
     if (cells.length !== headers.length) {
       throw new Error(`Row ${index + 2} has ${cells.length} columns; expected ${headers.length}.`);
     }
-    return Object.fromEntries(headers.map((header, columnIndex) => [header, cells[columnIndex].trim()]));
+    return Object.fromEntries(rowColumns.map(header => [
+      header,
+      cells[headers.indexOf(header)].trim()
+    ]));
   });
   if (rows.length === 0) throw new Error('Add at least one data row below the template headers.');
   if (rows.length > 5000) throw new Error('Upload is limited to 5,000 rows at a time.');
@@ -407,7 +414,11 @@ export default function App() {
       return;
     }
     try {
-      const rows = parseCsv(await file.text(), uploadTemplates[dataSource].columns);
+      const rows = parseCsv(
+        await file.text(),
+        uploadTemplates[dataSource].columns,
+        dataSource === 'checklist' ? ['LEGAL_ENTITY'] : []
+      );
       setUploadRows(rows);
       setUploadFileName(file.name);
     } catch (error) {
