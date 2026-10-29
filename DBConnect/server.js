@@ -65,6 +65,7 @@ const importSources = {
 const progressBindDefs = {
   checklistId: { type: oracledb.STRING, maxSize: 100 },
   ledgerId: { type: oracledb.NUMBER },
+  ledgerName: { type: oracledb.STRING, maxSize: 255 },
   period: { type: oracledb.STRING, maxSize: 10 },
   status: { type: oracledb.STRING, maxSize: 30 },
   owner: { type: oracledb.STRING, maxSize: 150 },
@@ -338,6 +339,209 @@ async function main() {
         return;
       }
 
+      if (request.method === 'GET' && url.pathname === '/api/ledger-overviews') {
+        const period = url.searchParams.get('period') || '';
+        if (!/^(0[1-9]|1[0-2])-\d{4}$/.test(period)) {
+          throw new HttpError(400, 'Period must use the MM-YYYY format.');
+        }
+        const connection = await pool.getConnection();
+        try {
+          const mappings = await connection.execute(
+            `SELECT LEDGER_ID,
+                    MAX(LEDGER_NAME) AS LEDGER_NAME,
+                    COUNT(*) AS MAPPING_COUNT,
+                    COUNT(DISTINCT CUTOFF_DATE) AS CUTOFF_DATE_COUNT,
+                    TO_CHAR(MIN(CUTOFF_DATE), 'YYYY-MM-DD') AS CUTOFF_DATE,
+                    COUNT(DISTINCT DUE_DAYS) AS DUE_DAYS_COUNT,
+                    MIN(DUE_DAYS) AS DUE_DAYS
+               FROM XX_BU_LE_LEDGER_MAPPING
+              WHERE LEDGER_ID IS NOT NULL
+              GROUP BY LEDGER_ID
+              ORDER BY MAX(LEDGER_NAME), LEDGER_ID`,
+            [],
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+          );
+          const ledgers = [];
+          for (const mapping of mappings.rows) {
+            const ledgerId = String(mapping.LEDGER_ID);
+            const result = await readTasks(connection, ledgerId, period);
+            const activities = [...new Map(result.tasks.map(task => [task.checklistRowId, task])).values()];
+            const completedCount = activities.filter(task => task.status === 'Complete').length;
+            const inProgressCount = activities.filter(task => task.status === 'In progress').length;
+            const blockedCount = activities.filter(task => task.status === 'Blocked').length;
+            const pendingCount = activities.filter(task => task.status === 'Not started').length;
+            const completion = activities.length
+              ? Math.round(completedCount / activities.length * 100)
+              : 0;
+            ledgers.push({
+              ledgerId,
+              ledgerName: mapping.LEDGER_NAME || ledgerId,
+              mappingCount: Number(mapping.MAPPING_COUNT),
+              activityCount: activities.length,
+              completedCount,
+              inProgressCount,
+              blockedCount,
+              pendingCount,
+              openCount: activities.length - completedCount,
+              completion,
+              status: completion === 100 && activities.length > 0
+                ? 'Complete'
+                : blockedCount > 0
+                  ? 'Blocked'
+                  : inProgressCount > 0
+                    ? 'In progress'
+                    : 'Not started',
+              moduleCount: new Set(activities.map(task => task.module)).size,
+              cutoffDate: Number(mapping.CUTOFF_DATE_COUNT) === 1 ? mapping.CUTOFF_DATE : '',
+              dueDays: Number(mapping.DUE_DAYS_COUNT) === 1 && mapping.DUE_DAYS != null
+                ? String(mapping.DUE_DAYS)
+                : '',
+              cutoffDateMixed: Number(mapping.CUTOFF_DATE_COUNT) > 1,
+              dueDaysMixed: Number(mapping.DUE_DAYS_COUNT) > 1
+            });
+          }
+          sendJson(response, 200, { ledgers });
+        } finally {
+          await connection.close();
+        }
+        return;
+      }
+
+      const ledgerMatch = url.pathname.match(/^\/api\/ledgers\/(\d+)$/);
+      if (request.method === 'PATCH' && ledgerMatch) {
+        const oldLedgerId = ledgerMatch[1];
+        if (!Number.isSafeInteger(Number(oldLedgerId))) {
+          throw new HttpError(400, 'The selected Ledger ID is not a valid numeric identifier.');
+        }
+        const body = await readRequestBody(request);
+        if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            Object.keys(body).some(key => !['ledgerId', 'ledgerName', 'cutoffDate', 'dueDays'].includes(key)) ||
+            typeof body.ledgerId !== 'string' || !/^\d+$/.test(body.ledgerId.trim()) ||
+            !Number.isSafeInteger(Number(body.ledgerId.trim())) ||
+            typeof body.ledgerName !== 'string' || !body.ledgerName.trim() || body.ledgerName.trim().length > 255 ||
+            typeof body.cutoffDate !== 'string' || typeof body.dueDays !== 'string') {
+          throw new HttpError(400, 'A numeric Ledger ID, Ledger name, cutoff date, and due days are required.');
+        }
+
+        const newLedgerId = body.ledgerId.trim();
+        const newLedgerName = body.ledgerName.trim();
+        const cutoffDateValue = body.cutoffDate.trim();
+        const dueDaysValue = body.dueDays.trim();
+        if (cutoffDateValue && !/^\d{4}-\d{2}-\d{2}$/.test(cutoffDateValue)) {
+          throw new HttpError(400, 'Cutoff date must use YYYY-MM-DD format.');
+        }
+        if (cutoffDateValue) {
+          const [year, month, day] = cutoffDateValue.split('-').map(Number);
+          const parsedDate = new Date(Date.UTC(year, month - 1, day));
+          if (parsedDate.getUTCFullYear() !== year ||
+              parsedDate.getUTCMonth() !== month - 1 ||
+              parsedDate.getUTCDate() !== day) {
+            throw new HttpError(400, 'Cutoff date must be a valid calendar date.');
+          }
+        }
+        if (dueDaysValue && (!Number.isFinite(Number(dueDaysValue)) || Number(dueDaysValue) < 0)) {
+          throw new HttpError(400, 'Due days must be a non-negative number.');
+        }
+        const cutoffDate = cutoffDateValue || null;
+        const dueDays = dueDaysValue ? Number(dueDaysValue) : null;
+        const connection = await pool.getConnection();
+        try {
+          const current = await connection.execute(
+            `SELECT LEDGER_NAME
+               FROM XX_BU_LE_LEDGER_MAPPING
+              WHERE TO_CHAR(LEDGER_ID) = :oldLedgerId
+              FETCH FIRST 1 ROWS ONLY`,
+            { oldLedgerId },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+          );
+          if (current.rows.length === 0) throw new HttpError(404, 'The selected Ledger has no Business Unit mappings.');
+          const oldLedgerName = current.rows[0].LEDGER_NAME;
+          if (!oldLedgerName) throw new HttpError(409, 'The selected Ledger mapping has no name and cannot be updated.');
+
+          const conflict = await connection.execute(
+            `SELECT COUNT(*) AS RECORD_COUNT
+               FROM XX_BU_LE_LEDGER_MAPPING
+              WHERE TO_CHAR(LEDGER_ID) = :newLedgerId
+                AND :newLedgerId <> :oldLedgerId`,
+            { newLedgerId, oldLedgerId },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+          );
+          if (Number(conflict.rows[0].RECORD_COUNT) > 0) {
+            throw new HttpError(409, 'That Ledger ID is already assigned to another Ledger.');
+          }
+
+          const progressConflict = await connection.execute(
+            `SELECT COUNT(*) AS RECORD_COUNT
+               FROM XX_OPERATIONAL_CHECKLIST_PROGRESS source
+               JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS target
+                 ON target.CHECKLIST_ROW_ID = source.CHECKLIST_ROW_ID
+                AND target.PERIOD = source.PERIOD
+                AND target.LEDGER_ID = :newLedgerId
+              WHERE source.LEDGER_ID = :oldLedgerId
+                AND :newLedgerId <> :oldLedgerId`,
+            { newLedgerId: Number(newLedgerId), oldLedgerId: Number(oldLedgerId) },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+          );
+          if (Number(progressConflict.rows[0].RECORD_COUNT) > 0) {
+            throw new HttpError(409, 'The Ledger ID cannot be changed because matching progress already exists under the new ID.');
+          }
+
+          try {
+            const ledgerBinds = {
+              oldLedgerId: Number(oldLedgerId),
+              newLedgerId: Number(newLedgerId),
+              newLedgerName
+            };
+            const mappingBinds = {
+              ...ledgerBinds,
+              cutoffDate,
+              dueDays
+            };
+            await connection.execute(
+              `UPDATE XX_BU_LE_LEDGER_MAPPING
+                  SET LEDGER_ID = :newLedgerId,
+                      LEDGER_NAME = :newLedgerName,
+                      CUTOFF_DATE = CASE WHEN :cutoffDate IS NULL THEN NULL
+                                         ELSE TO_DATE(:cutoffDate, 'YYYY-MM-DD') END,
+                      DUE_DAYS = :dueDays
+                WHERE LEDGER_ID = :oldLedgerId`,
+              mappingBinds,
+              {
+                bindDefs: {
+                  cutoffDate: { type: oracledb.STRING, maxSize: 10 },
+                  dueDays: { type: oracledb.NUMBER }
+                }
+              }
+            );
+            await connection.execute(
+              `UPDATE XX_OPERATIONAL_CHECKLIST
+                  SET LEDGER_ID = :newLedgerId,
+                      LEDGER_NAME = :newLedgerName
+                WHERE LEDGER_ID = :oldLedgerId
+                   OR (LEDGER_ID IS NULL
+                       AND UPPER(TRIM(LEDGER_NAME)) = UPPER(TRIM(:oldLedgerName)))`,
+              { ...ledgerBinds, oldLedgerName }
+            );
+            await connection.execute(
+              `UPDATE XX_OPERATIONAL_CHECKLIST_PROGRESS
+                  SET LEDGER_ID = :newLedgerId,
+                      LEDGER = :newLedgerName
+                WHERE LEDGER_ID = :oldLedgerId`,
+              ledgerBinds
+            );
+            await connection.commit();
+          } catch (error) {
+            await connection.rollback();
+            throw error;
+          }
+
+          sendJson(response, 200, { ok: true, ledgerId: newLedgerId, ledgerName: newLedgerName });
+        } finally {
+          await connection.close();
+        }
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/business-units') {
         const body = await readRequestBody(request);
         if (!body || typeof body !== 'object' || Array.isArray(body) || !body.record || typeof body.record !== 'object' || Array.isArray(body.record)) {
@@ -345,11 +549,19 @@ async function main() {
         }
 
         const record = body.record;
+        if (body.createLedger !== undefined && typeof body.createLedger !== 'boolean') {
+          throw new HttpError(400, 'createLedger must be a boolean when provided.');
+        }
         const required = ['BUSINESS_UNIT_ID', 'BUSINESS_UNIT_NAME', 'LEGAL_ENTITY_ID', 'LEGAL_ENTITY_NAME', 'LEDGER_ID', 'LEDGER_NAME'];
         for (const field of required) {
           if (!String(record[field] ?? '').trim()) {
             throw new HttpError(400, `${field} is required.`);
           }
+        }
+        if (body.createLedger &&
+            (!/^\d+$/.test(String(record.LEDGER_ID).trim()) ||
+             !Number.isSafeInteger(Number(String(record.LEDGER_ID).trim())))) {
+          throw new HttpError(400, 'A new Ledger ID must be a valid numeric identifier.');
         }
 
         const currencyCode = String(record.CURRENCY_CODE ?? '').trim() || null;
@@ -377,6 +589,18 @@ async function main() {
 
         const connection = await pool.getConnection();
         try {
+          if (body.createLedger) {
+            const existingLedger = await connection.execute(
+              `SELECT COUNT(*) AS RECORD_COUNT
+                 FROM XX_BU_LE_LEDGER_MAPPING
+                WHERE TO_CHAR(LEDGER_ID) = :ledgerId`,
+              { ledgerId: String(record.LEDGER_ID).trim() },
+              { outFormat: oracledb.OUT_FORMAT_OBJECT }
+            );
+            if (Number(existingLedger.rows[0].RECORD_COUNT) > 0) {
+              throw new HttpError(409, 'That Ledger ID already exists. Choose a new Ledger ID or use Update Ledger.');
+            }
+          }
           await connection.execute(
             `MERGE INTO XX_BU_LE_LEDGER_MAPPING target
               USING (
@@ -435,7 +659,10 @@ async function main() {
             },
             { bindDefs, autoCommit: true }
           );
-          sendJson(response, 200, { ok: true });
+          sendJson(response, 200, {
+            ok: true,
+            ...(body.createLedger ? { ledgerId: String(record.LEDGER_ID).trim() } : {})
+          });
         } catch (error) {
           if (String(error.message).includes('table or view does not exist') || String(error.message).includes('ORA-00942')) {
             throw new HttpError(404, 'The XX_BU_LE_LEDGER_MAPPING table is not available in the connected Oracle schema.');
@@ -641,7 +868,8 @@ async function main() {
         const connection = await pool.getConnection();
         try {
           const source = await connection.execute(
-            `SELECT mapping.BUSINESS_UNIT_ID
+            `SELECT mapping.BUSINESS_UNIT_ID,
+                    mapping.LEDGER_NAME
                  FROM XX_OPERATIONAL_CHECKLIST checklist
                  JOIN XX_BU_LE_LEDGER_MAPPING mapping
                    ON TO_CHAR(mapping.LEDGER_ID) = :ledgerId
@@ -666,9 +894,12 @@ async function main() {
           );
           if (source.rows.length === 0) throw new HttpError(404, 'Checklist task not found.');
           const businessUnitId = source.rows[0].BUSINESS_UNIT_ID;
+          const ledgerName = source.rows[0].LEDGER_NAME;
+          if (!ledgerName) throw new HttpError(400, 'The selected ledger has no ledger name in its Business Unit mapping.');
           const progress = {
             checklistId,
             ledgerId: Number(patch.ledgerId.trim()),
+            ledgerName,
             period: patch.period,
             status: patch.status,
             owner: patch.owner.trim(),
@@ -679,6 +910,7 @@ async function main() {
              USING (
                SELECT :checklistId AS CHECKLIST_ROW_ID,
                       :ledgerId AS LEDGER_ID,
+                      :ledgerName AS LEDGER,
                       :period AS PERIOD
                  FROM DUAL
              ) source
@@ -686,15 +918,16 @@ async function main() {
                     AND target.LEDGER_ID = source.LEDGER_ID
                     AND target.PERIOD = source.PERIOD)
              WHEN MATCHED THEN UPDATE SET
+               target.LEDGER = source.LEDGER,
                target.STATUS = :status,
                target.OWNER_NAME = :owner,
                target.NOTE = :note,
                target.NOTE_OVERRIDDEN = 'Y',
                target.UPDATED_AT = SYSTIMESTAMP
              WHEN NOT MATCHED THEN INSERT
-               (CHECKLIST_ROW_ID, LEDGER_ID, STATUS, OWNER_NAME, PERIOD, NOTE, NOTE_OVERRIDDEN)
+               (CHECKLIST_ROW_ID, LEDGER_ID, LEDGER, STATUS, OWNER_NAME, PERIOD, NOTE, NOTE_OVERRIDDEN)
                VALUES
-               (:checklistId, :ledgerId, :status, :owner, :period, :note, 'Y')`,
+               (:checklistId, :ledgerId, :ledgerName, :status, :owner, :period, :note, 'Y')`,
             progress,
             { bindDefs: progressBindDefs, autoCommit: true }
           );

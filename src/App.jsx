@@ -1,14 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Activity, ArrowUpRight, Building2, CalendarDays, ChartNoAxesCombined,
+  Activity, ArrowUpRight, CalendarDays, ChartNoAxesCombined,
   Check, CheckCircle2, ChevronRight, CircleHelp, FileSpreadsheet,
-  LayoutDashboard, ListChecks, Menu, PanelLeftClose, ShieldCheck, X
+  Landmark, LayoutDashboard, ListChecks, Menu, PanelLeftClose, ShieldCheck, X
 } from 'lucide-react';
 import StatusPill from './components/StatusPill.jsx';
 import SearchableSelect from './components/SearchableSelect.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import ChecklistPage from './pages/ChecklistPage.jsx';
-import BusinessUnitsPage from './pages/BusinessUnitsPage.jsx';
+import LedgerOverviewPage from './pages/LedgerOverviewPage.jsx';
 import CalendarPage from './pages/CalendarPage.jsx';
 import ReportsPage from './pages/ReportsPage.jsx';
 import DataSourcePage from './pages/DataSourcePage.jsx';
@@ -40,15 +40,10 @@ const uploadTemplates = {
 const navItems = [
   { id:'dashboard', label:'Dashboard', icon:LayoutDashboard },
   { id:'checklist', label:'Close checklist', icon:ListChecks },
-  { id:'entities', label:'Business units', icon:Building2 },
+  { id:'entities', label:'Ledger', icon:Landmark },
   { id:'calendar', label:'Checklist sequence', icon:CalendarDays },
   { id:'reports', label:'Reports & analytics', icon:ChartNoAxesCombined }
 ];
-
-const emptyBusinessUnit = {
-  BUSINESS_UNIT_ID: '', BUSINESS_UNIT_NAME: '', LEGAL_ENTITY_ID: '', LEGAL_ENTITY_NAME: '',
-  LEDGER_ID: '', LEDGER_NAME: '', CURRENCY_CODE: '', CUTOFF_DATE: '', DUE_DAYS: ''
-};
 
 function parseCsv(text, expectedColumns, legacyColumns = []) {
   const records = [];
@@ -154,6 +149,44 @@ function compareChecklistTasks(a, b) {
     a.entity.localeCompare(b.entity);
 }
 
+function summarizeLedgerTasks(ledger, mappings, tasks) {
+  const activities = [...new Map(tasks.map(task => [task.checklistRowId, task])).values()];
+  const completedCount = activities.filter(task => task.status === 'Complete').length;
+  const inProgressCount = activities.filter(task => task.status === 'In progress').length;
+  const blockedCount = activities.filter(task => task.status === 'Blocked').length;
+  const pendingCount = activities.filter(task => task.status === 'Not started').length;
+  const cutoffDates = [...new Set(mappings.map(record => record.CUTOFF_DATE).filter(Boolean))];
+  const dueDays = [...new Set(mappings.map(record => record.DUE_DAYS).filter(Boolean))];
+  const completion = activities.length
+    ? Math.round(completedCount / activities.length * 100)
+    : 0;
+
+  return {
+    ledgerId: ledger.id,
+    ledgerName: ledger.name,
+    mappingCount: mappings.length,
+    activityCount: activities.length,
+    completedCount,
+    inProgressCount,
+    blockedCount,
+    pendingCount,
+    openCount: activities.length - completedCount,
+    completion,
+    status: completion === 100 && activities.length > 0
+      ? 'Complete'
+      : blockedCount > 0
+        ? 'Blocked'
+        : inProgressCount > 0
+          ? 'In progress'
+          : 'Not started',
+    moduleCount: new Set(activities.map(task => task.module)).size,
+    cutoffDate: cutoffDates.length === 1 ? cutoffDates[0] : '',
+    dueDays: dueDays.length === 1 ? dueDays[0] : '',
+    cutoffDateMixed: cutoffDates.length > 1,
+    dueDaysMixed: dueDays.length > 1
+  };
+}
+
 function formatPeriodKey(date) {
   return `${String(date.getMonth() + 1).padStart(2, '0')}-${date.getFullYear()}`;
 }
@@ -187,14 +220,17 @@ function formatPeriodLabel(period) {
 
 export default function App() {
   const [tasks,setTasks] = useState([]);
+  const [allLedgerTasks,setAllLedgerTasks] = useState([]);
+  const [allLedgerTasksLoading,setAllLedgerTasksLoading] = useState(false);
+  const [allLedgerTasksError,setAllLedgerTasksError] = useState('');
   const [loading,setLoading] = useState(true);
   const [apiError,setApiError] = useState('');
   const [reloadCount,setReloadCount] = useState(0);
   const [saving,setSaving] = useState(false);
   const [page,setPage] = useState('dashboard');
   const [selectedLedgerId,setSelectedLedgerId] = useState('');
+  const [showAllLedgers,setShowAllLedgers] = useState(true);
   const [selectedPeriod,setSelectedPeriod] = useState(() => formatPeriodKey(new Date()));
-  const [selectedEntity,setSelectedEntity] = useState('ALL');
   const [search,setSearch] = useState('');
   const [statusFilter,setStatusFilter] = useState('All statuses');
   const [moduleFilter,setModuleFilter] = useState('All modules');
@@ -210,14 +246,16 @@ export default function App() {
   const [businessUnits,setBusinessUnits] = useState([]);
   const [businessUnitsLoading,setBusinessUnitsLoading] = useState(true);
   const [businessUnitLoadError,setBusinessUnitLoadError] = useState('');
-  const [selectedBusinessUnitId,setSelectedBusinessUnitId] = useState(null);
-  const [businessUnitEditor,setBusinessUnitEditor] = useState(null);
-  const [businessUnitForm,setBusinessUnitForm] = useState(emptyBusinessUnit);
-  const [businessUnitSaving,setBusinessUnitSaving] = useState(false);
-  const [businessUnitError,setBusinessUnitError] = useState('');
+  const [ledgerOverviews,setLedgerOverviews] = useState([]);
+  const [ledgerOverviewsLoading,setLedgerOverviewsLoading] = useState(true);
+  const [ledgerOverviewsError,setLedgerOverviewsError] = useState('');
 
   useEffect(() => {
     if (businessUnitsLoading || !selectedLedgerId) {
+      if (!selectedLedgerId) {
+        setTasks([]);
+        setApiError('');
+      }
       if (!businessUnitsLoading) setLoading(false);
       return undefined;
     }
@@ -285,55 +323,213 @@ export default function App() {
       if (selectedLedgerId) setSelectedLedgerId('');
       return;
     }
+    if (showAllLedgers && !selectedLedgerId) return;
     const ledgerExists = businessUnits.some(record => record.LEDGER_ID === selectedLedgerId);
-    if (!ledgerExists) setSelectedLedgerId(businessUnits[0].LEDGER_ID);
-  }, [businessUnits, businessUnitsLoading, selectedLedgerId]);
+    if (!selectedLedgerId || !ledgerExists) {
+      setSelectedLedgerId(businessUnits[0].LEDGER_ID);
+    }
+  }, [businessUnits, businessUnitsLoading, selectedLedgerId, showAllLedgers]);
+
+  useEffect(() => {
+    if (businessUnitsLoading) return undefined;
+    let cancelled = false;
+    const loadLedgerOverviews = async () => {
+      setLedgerOverviewsLoading(true);
+      setLedgerOverviewsError('');
+      try {
+        const query = new URLSearchParams({ period: selectedPeriod });
+        let summaries;
+        try {
+          const data = await apiRequest(`/ledger-overviews?${query}`);
+          if (!Array.isArray(data.ledgers)) {
+            throw new Error('Application returned an unexpected Ledger overview response.');
+          }
+          summaries = data.ledgers;
+        } catch (error) {
+          if (!error.message.includes('API route not found.')) throw error;
+
+          const mappingsByLedger = new Map();
+          businessUnits.filter(record => record.LEDGER_ID).forEach(record => {
+            const existing = mappingsByLedger.get(record.LEDGER_ID) || [];
+            existing.push(record);
+            mappingsByLedger.set(record.LEDGER_ID, existing);
+          });
+          const fallbackLedgers = [...mappingsByLedger.entries()].map(([id, mappings]) => ({
+            id,
+            name: mappings[0].LEDGER_NAME || id,
+            mappings
+          }));
+          summaries = await Promise.all(fallbackLedgers.map(async ledger => {
+            const taskQuery = new URLSearchParams({ ledgerId: ledger.id, period: selectedPeriod });
+            const taskData = await apiRequest(`/tasks?${taskQuery}`);
+            if (!Array.isArray(taskData.tasks)) {
+              throw new Error(`Application returned an unexpected task response for Ledger ${ledger.name}.`);
+            }
+            return summarizeLedgerTasks(ledger, ledger.mappings, taskData.tasks);
+          }));
+        }
+        if (!cancelled) setLedgerOverviews(summaries);
+      } catch (error) {
+        if (!cancelled) {
+          setLedgerOverviews([]);
+          setLedgerOverviewsError(`Could not load Ledger overviews from Application: ${error.message}`);
+        }
+      } finally {
+        if (!cancelled) setLedgerOverviewsLoading(false);
+      }
+    };
+    loadLedgerOverviews();
+    return () => { cancelled = true; };
+  }, [reloadCount, selectedPeriod, businessUnits, businessUnitsLoading]);
+
+  useEffect(() => {
+    if (!showAllLedgers || businessUnitsLoading) {
+      setAllLedgerTasks([]);
+      setAllLedgerTasksError('');
+      setAllLedgerTasksLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const loadAllLedgerTasks = async () => {
+      setAllLedgerTasksLoading(true);
+      setAllLedgerTasksError('');
+      try {
+        const mappingsByLedger = new Map();
+        businessUnits.filter(record => record.LEDGER_ID).forEach(record => {
+          const mappings = mappingsByLedger.get(record.LEDGER_ID) || [];
+          mappings.push(record);
+          mappingsByLedger.set(record.LEDGER_ID, mappings);
+        });
+        const ledgerTaskResults = await Promise.all([...mappingsByLedger.keys()].map(async ledgerId => {
+          const query = new URLSearchParams({ ledgerId, period: selectedPeriod });
+          const data = await apiRequest(`/tasks?${query}`);
+          if (!Array.isArray(data.tasks)) {
+            throw new Error(`Application returned an unexpected task response for Ledger ${ledgerId}.`);
+          }
+          return data.tasks;
+        }));
+        if (!cancelled) setAllLedgerTasks(ledgerTaskResults.flat());
+      } catch (error) {
+        if (!cancelled) {
+          setAllLedgerTasks([]);
+          setAllLedgerTasksError(`Could not load activities across all Ledgers: ${error.message}`);
+        }
+      } finally {
+        if (!cancelled) setAllLedgerTasksLoading(false);
+      }
+    };
+    loadAllLedgerTasks();
+    return () => { cancelled = true; };
+  }, [showAllLedgers, businessUnitsLoading, businessUnits, selectedPeriod, reloadCount]);
 
   const ledgerOptions = [...new Map(businessUnits
     .filter(record => record.LEDGER_ID)
     .map(record => [record.LEDGER_ID, { id: record.LEDGER_ID, name: record.LEDGER_NAME || record.LEDGER_ID }]))
     .values()].sort((a, b) => a.name.localeCompare(b.name));
   const applicable = tasks;
-  const searchableLedgerOptions = ledgerOptions.map(ledger => ({
+  const searchableLedgerOptions = [{ value: '__ALL__', label: 'All ledgers', detail: 'View all Ledger details' }, ...ledgerOptions.map(ledger => ({
     value: ledger.id,
     label: ledger.name,
     detail: ledger.id,
     searchText: ledger.id
-  }));
-  const businessUnitOptions = [...new Map(businessUnits
-    .filter(record => record.LEDGER_ID === selectedLedgerId)
-    .map(record => [
-      record.BUSINESS_UNIT_ID,
-      { id: record.BUSINESS_UNIT_ID, name: record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID }
-    ])).values()];
+  }))];
   const visibleTasks = useMemo(() => applicable.filter(task =>
-    (selectedEntity === 'ALL' || task.businessUnitId === selectedEntity) &&
     (statusFilter === 'All statuses' || task.status === statusFilter) &&
     (moduleFilter === 'All modules' || task.module === moduleFilter) &&
     [task.title,task.processDescription,task.module,task.owner,task.entity,task.legalEntityName,task.ledgerName]
       .filter(Boolean).join(' ').toLowerCase().includes(search.toLowerCase())
-  ).sort(compareChecklistTasks),[applicable,selectedEntity,statusFilter,moduleFilter,search]);
+  ).sort(compareChecklistTasks),[applicable,statusFilter,moduleFilter,search]);
 
   const completedCount = applicable.filter(task=>task.status==='Complete').length;
   const inProgressCount = applicable.filter(task=>task.status==='In progress').length;
   const blockedCount = applicable.filter(task=>task.status==='Blocked').length;
   const pendingCount = applicable.filter(task=>task.status==='Not started').length;
   const completion = applicable.length ? Math.round(completedCount/applicable.length*100) : 0;
-  const scopedBusinessUnits = businessUnits.filter(record => record.LEDGER_ID === selectedLedgerId);
-  const mappingBusinessUnits = scopedBusinessUnits.map((record, index) => ({
-    id: record.MAPPING_ID ? `mapping:${record.MAPPING_ID}` : `mapping:${record.BUSINESS_UNIT_ID}:${record.LEGAL_ENTITY_ID}:${record.LEDGER_ID}:${index}`,
-    name: record.BUSINESS_UNIT_NAME || record.BUSINESS_UNIT_ID || 'Unassigned',
-    mappingRecord: record
-  }));
-  const businessUnitCards = mappingBusinessUnits.map(entity=>{
-    const list = applicable.filter(task =>
-      task.businessUnitId === entity.mappingRecord.BUSINESS_UNIT_ID
-    );
-    const done = list.filter(task=>task.status==='Complete').length;
-    const inProgress = list.filter(task=>task.status==='In progress').length;
-    const blocked = list.filter(task=>task.status==='Blocked').length;
-    return { ...entity, total: list.length, done, inProgress, blocked, pending: list.length-done-inProgress-blocked, pct: list.length ? Math.round(done/list.length*100) : 0 };
+  const ledgerActivities = useMemo(() => [...new Map(applicable.map(task=>[task.checklistRowId,task])).values()]
+    .sort(compareChecklistTasks),[applicable]);
+  const allLedgerActivities = useMemo(() => [...new Map(allLedgerTasks.map(task=>[
+    `${task.ledgerId}|${task.checklistRowId}`,
+    task
+  ])).values()].sort((a,b)=>
+    String(a.ledgerName).localeCompare(String(b.ledgerName)) ||
+    compareChecklistTasks(a,b)
+  ),[allLedgerTasks]);
+  const sequenceActivities = showAllLedgers ? allLedgerActivities : ledgerActivities;
+  const ledgerActivityGroups = new Map();
+  sequenceActivities.forEach(task => {
+    const group = ledgerActivityGroups.get(task.ledgerId) || [];
+    group.push(task);
+    ledgerActivityGroups.set(task.ledgerId, group);
   });
+  const reportLedgers = showAllLedgers
+    ? ledgerOptions
+    : ledgerOptions.filter(ledger => ledger.id === selectedLedgerId);
+  const reportLedgerStats = reportLedgers.map(ledger => {
+    const activities = ledgerActivityGroups.get(ledger.id) || [];
+    const mappings = businessUnits.filter(record => record.LEDGER_ID === ledger.id);
+    const summary = summarizeLedgerTasks(ledger, mappings, activities);
+    return {
+      id: ledger.id,
+      name: ledger.name,
+      pct: summary.completion,
+      total: summary.activityCount,
+      done: summary.completedCount
+    };
+  }).sort((a,b)=>a.name.localeCompare(b.name));
+  const sequenceCompletedCount = sequenceActivities.filter(task=>task.status==='Complete').length;
+  const sequenceInProgressCount = sequenceActivities.filter(task=>task.status==='In progress').length;
+  const sequenceBlockedCount = sequenceActivities.filter(task=>task.status==='Blocked').length;
+  const sequencePendingCount = sequenceActivities.filter(task=>task.status==='Not started').length;
+  const sequenceCompletion = sequenceActivities.length
+    ? Math.round(sequenceCompletedCount / sequenceActivities.length * 100)
+    : 0;
+  const sequenceModules = [...new Set(sequenceActivities.map(task=>task.module))].sort();
+  const sequenceVisibleActivities = useMemo(() => sequenceActivities.filter(task =>
+    (statusFilter === 'All statuses' || task.status === statusFilter) &&
+    (moduleFilter === 'All modules' || task.module === moduleFilter) &&
+    [task.title,task.processDescription,task.module,task.owner,task.ledgerName]
+      .filter(Boolean).join(' ').toLowerCase().includes(search.toLowerCase())
+  ),[sequenceActivities,statusFilter,moduleFilter,search]);
+  const visibleLedgerActivities = useMemo(() => ledgerActivities.filter(task =>
+    (statusFilter === 'All statuses' || task.status === statusFilter) &&
+    (moduleFilter === 'All modules' || task.module === moduleFilter) &&
+    [task.title,task.processDescription,task.module,task.owner,task.ledgerName]
+      .filter(Boolean).join(' ').toLowerCase().includes(search.toLowerCase())
+  ),[ledgerActivities,statusFilter,moduleFilter,search]);
+  const ledgerCompletedCount = ledgerActivities.filter(task=>task.status==='Complete').length;
+  const ledgerInProgressCount = ledgerActivities.filter(task=>task.status==='In progress').length;
+  const ledgerBlockedCount = ledgerActivities.filter(task=>task.status==='Blocked').length;
+  const ledgerPendingCount = ledgerActivities.filter(task=>task.status==='Not started').length;
+  const ledgerCompletion = ledgerActivities.length
+    ? Math.round(ledgerCompletedCount / ledgerActivities.length * 100)
+    : 0;
+  const selectedLedgerName = ledgerOptions.find(ledger=>ledger.id===selectedLedgerId)?.name || '';
+  const ledgerStatus = ledgerCompletion === 100 && ledgerActivities.length > 0
+    ? 'Complete'
+    : ledgerBlockedCount > 0
+      ? 'Blocked'
+      : ledgerInProgressCount > 0
+        ? 'In progress'
+        : 'Not started';
+  const ledgerStats = selectedLedgerId ? [{
+    id: selectedLedgerId,
+    name: selectedLedgerName || selectedLedgerId,
+    legalEntityName: 'Selected ledger',
+    total: ledgerActivities.length,
+    done: ledgerCompletedCount,
+    inProgress: ledgerInProgressCount,
+    blocked: ledgerBlockedCount,
+    pending: ledgerPendingCount,
+    pct: ledgerCompletion
+  }] : [];
+  const scopedBusinessUnits = businessUnits.filter(record => record.LEDGER_ID === selectedLedgerId);
+  const mappedCutoffDates = [...new Set(scopedBusinessUnits.map(record => record.CUTOFF_DATE).filter(Boolean))];
+  const mappedDueDays = [...new Set(scopedBusinessUnits.map(record => record.DUE_DAYS).filter(Boolean))];
+  const selectedLedgerCutoffDate = mappedCutoffDates.length === 1 ? mappedCutoffDates[0] : '';
+  const selectedLedgerDueDays = mappedDueDays.length === 1 ? mappedDueDays[0] : '';
+  const ledgerCutoffDateMixed = mappedCutoffDates.length > 1;
+  const ledgerDueDaysMixed = mappedDueDays.length > 1;
   const dashboardUnits = [
     ...scopedBusinessUnits.map(record => ({
       id: record.BUSINESS_UNIT_ID,
@@ -347,16 +543,13 @@ export default function App() {
     }))
   ];
   const entityStats = [...new Map(dashboardUnits.map(unit => [unit.id, unit])).values()].map(entity=>{
-    const list = applicable.filter(task=>task.businessUnitId===entity.id || task.entity===entity.name);
+    const list = applicable.filter(task=>task.businessUnitId===entity.id);
     const done = list.filter(task=>task.status==='Complete').length;
     const inProgress = list.filter(task=>task.status==='In progress').length;
     const blocked = list.filter(task=>task.status==='Blocked').length;
     return { ...entity, total: list.length, done, inProgress, blocked, pending: list.length-done-inProgress-blocked, pct: list.length ? Math.round(done/list.length*100) : 0 };
   });
-  const fullyClosed = entityStats.filter(entity=>entity.total>0 && entity.done===entity.total).length;
   const modules = [...new Set(applicable.map(task=>task.module))].sort();
-  const checklistRows = [...new Map(applicable.map(task=>[task.checklistRowId,task])).values()]
-    .sort(compareChecklistTasks);
 
   const updateTask = (id,patch) => {
     setDetailTask(previous=>previous && previous.id===id?{...previous,...patch}:previous);
@@ -378,6 +571,7 @@ export default function App() {
         })
       });
       setTasks(previous=>previous.map(task=>task.id===savedTask.id?{...task,...savedTask}:task));
+      setAllLedgerTasks(previous=>previous.map(task=>task.id===savedTask.id?{...task,...savedTask}:task));
       setDetailTask(null);
       setToast('Task changes saved to Application.');
     } catch (error) {
@@ -445,65 +639,66 @@ export default function App() {
     }
   };
 
-  const openBusinessUnitEditor = (record = null) => {
-    setBusinessUnitForm(record || emptyBusinessUnit);
-    setBusinessUnitError('');
-    setBusinessUnitEditor(true);
-  };
-
-  const updateBusinessUnitField = (field, value) => {
-    setBusinessUnitForm(current => ({ ...current, [field]: value }));
-  };
-
-  const saveBusinessUnitRecord = async () => {
-    setBusinessUnitSaving(true);
-    setBusinessUnitError('');
-    try {
-      const payload = {
-        record: {
-          ...businessUnitForm,
-          BUSINESS_UNIT_ID: String(businessUnitForm.BUSINESS_UNIT_ID ?? '').trim(),
-          BUSINESS_UNIT_NAME: String(businessUnitForm.BUSINESS_UNIT_NAME ?? '').trim(),
-          LEGAL_ENTITY_ID: String(businessUnitForm.LEGAL_ENTITY_ID ?? '').trim(),
-          LEGAL_ENTITY_NAME: String(businessUnitForm.LEGAL_ENTITY_NAME ?? '').trim(),
-          LEDGER_ID: String(businessUnitForm.LEDGER_ID ?? '').trim(),
-          LEDGER_NAME: String(businessUnitForm.LEDGER_NAME ?? '').trim(),
-          CURRENCY_CODE: String(businessUnitForm.CURRENCY_CODE ?? '').trim(),
-          CUTOFF_DATE: String(businessUnitForm.CUTOFF_DATE ?? '').trim(),
-          DUE_DAYS: String(businessUnitForm.DUE_DAYS ?? '').trim()
-        }
-      };
-
-      if (!payload.record.BUSINESS_UNIT_ID || !payload.record.BUSINESS_UNIT_NAME || !payload.record.LEGAL_ENTITY_ID || !payload.record.LEGAL_ENTITY_NAME || !payload.record.LEDGER_ID || !payload.record.LEDGER_NAME) {
-        throw new Error('Business unit, legal entity and ledger details are required.');
-      }
-
-      await apiRequest('/business-units', {
-        method: 'POST',
-        body: JSON.stringify(payload)
-      });
-
-      setBusinessUnitEditor(null);
-      setToast('Business unit record saved to XX_BU_LE_LEDGER_MAPPING.');
-      setReloadCount(count => count + 1);
-    } catch (error) {
-      setBusinessUnitError(error.message);
-    } finally {
-      setBusinessUnitSaving(false);
+  const updateLedger = async ({ oldLedgerId = selectedLedgerId, ledgerId, ledgerName, cutoffDate, dueDays }) => {
+    if (!oldLedgerId) throw new Error('Select a Ledger to update.');
+    const result = await apiRequest(`/ledgers/${encodeURIComponent(oldLedgerId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ ledgerId, ledgerName, cutoffDate, dueDays })
+    });
+    if (typeof result?.ledgerId !== 'string') {
+      throw new Error('Application returned an unexpected Ledger update response.');
     }
+    setSelectedLedgerId(result.ledgerId);
+    setShowAllLedgers(false);
+    setBusinessUnitsLoading(true);
+    setDetailTask(null);
+    setReloadCount(count => count + 1);
+    setToast('Ledger and linked activity records updated.');
   };
 
-  const exportCsv = () => {
-    const rows = [['CHECKLIST_ROW_ID','MODULE_NAME','LEDGER_NAME','BUSINESS_UNIT_ID','BUSINESS_UNIT_NAME','LEGAL_ENTITY','PROCESS_OWNER','PROCESS_NAME','PROCESS_DESCRIPTION','ACTION_BY','PRE_REQUISITE_DESC','ACTION_TYPE','PROCESS_TYPE','PERIOD','STATUS','ASSIGNED_USER','WORKFLOW_COMMENT']];
-    visibleTasks.forEach(task=>{
-      rows.push([task.checklistRowId,task.moduleName,task.ledgerName,task.businessUnitId,task.entity,task.legalEntityName,task.processOwner,task.title,task.processDescription,task.actionBy,task.prerequisiteDescription,task.actionType,task.processType,selectedPeriod,task.status,task.owner,task.note||'']);
+  const createLedger = async record => {
+    const payload = {
+      ...record,
+      LEDGER_ID: String(record.LEDGER_ID ?? '').trim(),
+      LEDGER_NAME: String(record.LEDGER_NAME ?? '').trim(),
+      BUSINESS_UNIT_ID: String(record.BUSINESS_UNIT_ID ?? '').trim(),
+      BUSINESS_UNIT_NAME: String(record.BUSINESS_UNIT_NAME ?? '').trim(),
+      LEGAL_ENTITY_ID: String(record.LEGAL_ENTITY_ID ?? '').trim(),
+      LEGAL_ENTITY_NAME: String(record.LEGAL_ENTITY_NAME ?? '').trim(),
+      CURRENCY_CODE: String(record.CURRENCY_CODE ?? '').trim(),
+      CUTOFF_DATE: String(record.CUTOFF_DATE ?? '').trim(),
+      DUE_DAYS: String(record.DUE_DAYS ?? '').trim()
+    };
+    const result = await apiRequest('/business-units', {
+      method: 'POST',
+      body: JSON.stringify({ record: payload, createLedger: true })
+    });
+    if (typeof result?.ledgerId !== 'string') {
+      throw new Error('Application returned an unexpected Ledger creation response.');
+    }
+    setSelectedLedgerId(result.ledgerId);
+    setShowAllLedgers(false);
+    setBusinessUnitsLoading(true);
+    setDetailTask(null);
+    setReloadCount(count => count + 1);
+    setToast('New Ledger and its first Business Unit mapping created.');
+  };
+
+  const exportCsv = (tasks = visibleTasks, ledgerScope = false) => {
+    const rows = [ledgerScope
+      ? ['CHECKLIST_ROW_ID','MODULE_NAME','LEDGER_ID','LEDGER_NAME','PROCESS_OWNER','PROCESS_NAME','PROCESS_DESCRIPTION','ACTION_BY','PRE_REQUISITE_DESC','ACTION_TYPE','PROCESS_TYPE','PERIOD','STATUS','ASSIGNED_USER','WORKFLOW_COMMENT']
+      : ['CHECKLIST_ROW_ID','MODULE_NAME','LEDGER_NAME','BUSINESS_UNIT_ID','BUSINESS_UNIT_NAME','LEGAL_ENTITY','PROCESS_OWNER','PROCESS_NAME','PROCESS_DESCRIPTION','ACTION_BY','PRE_REQUISITE_DESC','ACTION_TYPE','PROCESS_TYPE','PERIOD','STATUS','ASSIGNED_USER','WORKFLOW_COMMENT']];
+    tasks.forEach(task=>{
+      rows.push(ledgerScope
+        ? [task.checklistRowId,task.moduleName,task.ledgerId,task.ledgerName,task.processOwner,task.title,task.processDescription,task.actionBy,task.prerequisiteDescription,task.actionType,task.processType,selectedPeriod,task.status,task.owner,task.note||'']
+        : [task.checklistRowId,task.moduleName,task.ledgerName,task.businessUnitId,task.entity,task.legalEntityName,task.processOwner,task.title,task.processDescription,task.actionBy,task.prerequisiteDescription,task.actionType,task.processType,selectedPeriod,task.status,task.owner,task.note||'']);
     });
     const csv = rows.map(row=>row.map(value=>`"${String(value??'').replaceAll('"','""')}"`).join(',')).join('\n');
     const blob = new Blob([csv],{type:'text/csv;charset=utf-8;'});
     const url=URL.createObjectURL(blob);
     const link=document.createElement('a');
     link.href=url;
-    link.download='operational-checklist.csv';
+    link.download=ledgerScope?'ledger-operational-checklist.csv':'operational-checklist.csv';
     link.click();
     URL.revokeObjectURL(url);
     setToast('Checklist exported to CSV');
@@ -521,7 +716,7 @@ export default function App() {
       <div className="workspace-label">WORKSPACE</div>
       <nav className="nav-list">
         {navItems.map(item=><button key={item.id} className={`nav-item ${page===item.id?'active':''}`} onClick={()=>{setPage(item.id);setMobileNav(false);}}>
-          <item.icon size={18}/><span>{item.label}</span>{item.id==='checklist'&&<span className="nav-count">{pendingCount}</span>}
+          <item.icon size={18}/><span>{item.label}</span>{item.id==='checklist'&&<span className="nav-count">{ledgerPendingCount}</span>}
         </button>)}
       </nav>
       <div className="sidebar-section">
@@ -547,8 +742,17 @@ export default function App() {
             label="LEDGER"
             ariaLabel="Ledger"
             options={searchableLedgerOptions}
-            value={selectedLedgerId}
-            onChange={ledgerId=>{setSelectedLedgerId(ledgerId);setSelectedEntity('ALL');setDetailTask(null);}}
+            value={showAllLedgers?'__ALL__':selectedLedgerId}
+            onChange={ledgerId=>{
+              setDetailTask(null);
+              if (ledgerId==='__ALL__') {
+                setSelectedLedgerId('');
+                setShowAllLedgers(true);
+              } else {
+                setShowAllLedgers(false);
+                setSelectedLedgerId(ledgerId);
+              }
+            }}
             placeholder={businessUnitsLoading
               ? 'Loading ledgers...'
               : businessUnitLoadError
@@ -586,42 +790,67 @@ export default function App() {
           <button className="btn secondary compact" onClick={()=>{setDataSource('mapping');setPage('dataSource');}}>Upload Business Units</button>
         </div>}
 
-      {apiError && <div className="api-error" role="alert"><span>{apiError}</span><button className="btn secondary compact" onClick={()=>setReloadCount(count=>count+1)} disabled={loading}>Retry</button></div>}
-      {loading && <div className="api-loading" role="status">Connecting to Application and loading close tasks…</div>}
-      <div className={`page-content ${page==='entities' ? 'business-units-content' : ''}`}>
+      {apiError && selectedLedgerId && <div className="api-error" role="alert"><span>{apiError}</span><button className="btn secondary compact" onClick={()=>setReloadCount(count=>count+1)} disabled={loading}>Retry</button></div>}
+      {loading && selectedLedgerId && <div className="api-loading" role="status">Connecting to Application and loading close tasks…</div>}
+      <div className={`page-content ${page==='entities' ? 'ledger-overview-content' : ''}`}>
         {page==='dashboard' && <DashboardPage
-          completion={completion} completedCount={completedCount}
-          inProgressCount={inProgressCount} blockedCount={blockedCount} pendingCount={pendingCount}
-          fullyClosed={fullyClosed} moduleCount={modules.length} entityStats={entityStats}
-          selectedLedger={ledgerOptions.find(ledger=>ledger.id===selectedLedgerId)?.name || ''}
+          completion={ledgerCompletion} completedCount={ledgerCompletedCount}
+          inProgressCount={ledgerInProgressCount} blockedCount={ledgerBlockedCount} pendingCount={ledgerPendingCount}
+          ledgerStatus={ledgerStatus} moduleCount={[...new Set(ledgerActivities.map(task=>task.module))].length}
+          entityStats={ledgerStats}
+          selectedLedger={selectedLedgerName}
           selectedPeriod={formatPeriodLabel(selectedPeriod)}
-          applicable={applicable} onGoChecklist={()=>setPage('checklist')}
-          onSelectEntity={id=>{setSelectedEntity(id);setPage('checklist');}}
-          onViewEntities={()=>setPage('entities')} onOpenTask={task=>setDetailTask(task)}
+          applicable={ledgerActivities} onGoChecklist={()=>setPage('checklist')}
+          onOpenTask={task=>setDetailTask(task)}
         />}
         {page==='checklist' && <ChecklistPage
-          completedCount={completedCount} inProgressCount={inProgressCount}
-          pendingCount={pendingCount} blockedCount={blockedCount} exportCsv={exportCsv}
+          completedCount={ledgerCompletedCount} inProgressCount={ledgerInProgressCount}
+          pendingCount={ledgerPendingCount} blockedCount={ledgerBlockedCount}
+          exportCsv={()=>exportCsv(visibleLedgerActivities,true)}
           selectedPeriod={formatPeriodLabel(selectedPeriod)}
-          search={search} setSearch={setSearch} selectedEntity={selectedEntity}
-          setSelectedEntity={setSelectedEntity} businessUnitOptions={businessUnitOptions}
+          search={search} setSearch={setSearch}
           statusFilter={statusFilter} setStatusFilter={setStatusFilter}
           moduleFilter={moduleFilter} setModuleFilter={setModuleFilter} modules={modules}
-          visibleTasks={visibleTasks} applicable={applicable} onOpenTask={setDetailTask}
+          visibleTasks={visibleLedgerActivities} applicable={ledgerActivities} onOpenTask={setDetailTask}
         />}
-        {page==='entities' && <BusinessUnitsPage
-          businessUnitsLoading={businessUnitsLoading} businessUnits={businessUnits}
-          businessUnitCards={businessUnitCards} businessUnitLoadError={businessUnitLoadError}
-          reload={()=>setReloadCount(count=>count+1)} openBusinessUnitEditor={openBusinessUnitEditor}
-          selectedBusinessUnitId={selectedBusinessUnitId} setSelectedBusinessUnitId={setSelectedBusinessUnitId}
-          exportCsv={exportCsv}
+        {page==='entities' && <LedgerOverviewPage
+          loading={!showAllLedgers && (businessUnitsLoading || loading)}
+          error={!showAllLedgers ? businessUnitLoadError || apiError : ''}
+          selectedLedger={selectedLedgerName} selectedLedgerId={selectedLedgerId}
+          showAllLedgers={showAllLedgers} ledgers={ledgerOverviews}
+          overviewsLoading={ledgerOverviewsLoading} overviewsError={ledgerOverviewsError}
+          selectedPeriod={formatPeriodLabel(selectedPeriod)} status={ledgerStatus}
+          completion={ledgerCompletion} completedCount={ledgerCompletedCount}
+          openCount={ledgerActivities.length-ledgerCompletedCount}
+          inProgressCount={ledgerInProgressCount} pendingCount={ledgerPendingCount}
+          blockedCount={ledgerBlockedCount} activityCount={ledgerActivities.length}
+          cutoffDate={selectedLedgerCutoffDate} dueDays={selectedLedgerDueDays}
+          cutoffDateMixed={ledgerCutoffDateMixed} dueDaysMixed={ledgerDueDaysMixed}
+          moduleCount={[...new Set(ledgerActivities.map(task=>task.module))].length}
+          onRetry={()=>setReloadCount(count=>count+1)}
+          onGoChecklist={()=>setPage('checklist')}
+          onSelectLedger={ledgerId=>{setShowAllLedgers(false);setSelectedLedgerId(ledgerId);}}
+          exportCsv={()=>exportCsv(visibleLedgerActivities,true)}
+          onUpdateLedger={updateLedger} onCreateLedger={createLedger}
         />}
-        {page==='calendar' && <CalendarPage checklistRows={checklistRows} exportCsv={exportCsv}/>}
+        {page==='calendar' && <CalendarPage
+          checklistRows={sequenceVisibleActivities}
+          exportCsv={()=>exportCsv(sequenceVisibleActivities,true)}
+          scopeLabel={showAllLedgers ? 'All ledgers' : selectedLedgerName || selectedLedgerId}
+          loading={showAllLedgers ? businessUnitsLoading || allLedgerTasksLoading : loading}
+          error={showAllLedgers ? businessUnitLoadError || allLedgerTasksError : apiError}
+          onRetry={()=>setReloadCount(count=>count+1)}
+        />}
         {page==='reports' && <ReportsPage
-          completion={completion} completedCount={completedCount} inProgressCount={inProgressCount}
-          blockedCount={blockedCount} pendingCount={pendingCount} applicable={applicable}
-          fullyClosed={fullyClosed} entityStats={entityStats} modules={modules}
-          exportCsv={exportCsv} setPage={setPage} onOpenTask={setDetailTask}
+          completion={sequenceCompletion} completedCount={sequenceCompletedCount}
+          inProgressCount={sequenceInProgressCount} blockedCount={sequenceBlockedCount}
+          pendingCount={sequencePendingCount} applicable={sequenceActivities}
+          ledgerStats={reportLedgerStats} modules={sequenceModules}
+          exportCsv={()=>exportCsv(sequenceActivities,true)} setPage={setPage} onOpenTask={setDetailTask}
+          scopeLabel={showAllLedgers ? 'All ledgers' : selectedLedgerName || selectedLedgerId}
+          loading={showAllLedgers ? businessUnitsLoading || allLedgerTasksLoading : loading}
+          error={showAllLedgers ? businessUnitLoadError || allLedgerTasksError : apiError}
+          onRetry={()=>setReloadCount(count=>count+1)}
         />}
         {page==='dataSource' && <DataSourcePage
           template={uploadTemplates[dataSource]} downloadTemplate={downloadUploadTemplate}
@@ -638,8 +867,6 @@ export default function App() {
         {apiError && <p className="form-error" role="alert">{apiError}</p>}
         <span className="module-chip">{detailTask.module}</span><h3 className="drawer-task-title">{detailTask.title}</h3><div className="drawer-status-row"><StatusPill status={detailTask.status}/></div>
         <label className="field-label">Ledger</label><p>{detailTask.ledgerName}</p>
-        <label className="field-label">Business unit</label><p>{detailTask.entity}</p>
-        {detailTask.legalEntityName && <><label className="field-label">Legal entity</label><p>{detailTask.legalEntityName}</p></>}
         {detailTask.processDescription && <><label className="field-label">Process description</label><p>{detailTask.processDescription}</p></>}
         {detailTask.processOwner && <><label className="field-label">Source process owner</label><p>{detailTask.processOwner}</p></>}
         {detailTask.actionBy && <><label className="field-label">Action by</label><p>{detailTask.actionBy}</p></>}
@@ -652,25 +879,6 @@ export default function App() {
         <div className="drawer-note"><ShieldCheck size={16}/><span>Workflow status, owner and comments are stored separately from the source checklist.</span></div>
       </div>
       <div className="drawer-footer"><button className="btn secondary" onClick={()=>setDetailTask(null)}>Cancel</button><button className="btn primary" onClick={saveTask} disabled={saving}><Check size={16}/>{saving?'Saving…':'Save changes'}</button></div>
-    </div></div>}
-
-    {businessUnitEditor !== null && <div className="modal-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)setBusinessUnitEditor(null)}}><div className="detail-drawer business-unit-drawer">
-      <div className="drawer-head"><div><div className="eyebrow">BUSINESS UNIT RECORD</div><h2>{businessUnitForm.BUSINESS_UNIT_NAME ? 'Update mapping' : 'Add business unit'}</h2></div><button className="icon-btn" onClick={()=>setBusinessUnitEditor(null)}><X size={19}/></button></div>
-      <div className="drawer-body business-unit-form-body">
-        {businessUnitError && <p className="form-error" role="alert">{businessUnitError}</p>}
-        <div className="field-grid">
-          <div><label className="field-label">Business unit ID</label><input className="field-control" value={businessUnitForm.BUSINESS_UNIT_ID} onChange={event=>updateBusinessUnitField('BUSINESS_UNIT_ID', event.target.value)}/></div>
-          <div><label className="field-label">Business unit name</label><input className="field-control" value={businessUnitForm.BUSINESS_UNIT_NAME} onChange={event=>updateBusinessUnitField('BUSINESS_UNIT_NAME', event.target.value)}/></div>
-          <div><label className="field-label">Legal entity ID</label><input className="field-control" value={businessUnitForm.LEGAL_ENTITY_ID} onChange={event=>updateBusinessUnitField('LEGAL_ENTITY_ID', event.target.value)}/></div>
-          <div><label className="field-label">Legal entity name</label><input className="field-control" value={businessUnitForm.LEGAL_ENTITY_NAME} onChange={event=>updateBusinessUnitField('LEGAL_ENTITY_NAME', event.target.value)}/></div>
-          <div><label className="field-label">Ledger ID</label><input className="field-control" value={businessUnitForm.LEDGER_ID} onChange={event=>updateBusinessUnitField('LEDGER_ID', event.target.value)}/></div>
-          <div><label className="field-label">Ledger name</label><input className="field-control" value={businessUnitForm.LEDGER_NAME} onChange={event=>updateBusinessUnitField('LEDGER_NAME', event.target.value)}/></div>
-          <div><label className="field-label">Currency code</label><input className="field-control" value={businessUnitForm.CURRENCY_CODE} onChange={event=>updateBusinessUnitField('CURRENCY_CODE', event.target.value)}/></div>
-          <div><label className="field-label">Cutoff date</label><input className="field-control" type="date" value={businessUnitForm.CUTOFF_DATE} onChange={event=>updateBusinessUnitField('CUTOFF_DATE', event.target.value)}/></div>
-          <div><label className="field-label">Due days</label><input className="field-control" type="number" value={businessUnitForm.DUE_DAYS} onChange={event=>updateBusinessUnitField('DUE_DAYS', event.target.value)}/></div>
-        </div>
-      </div>
-      <div className="drawer-footer"><button className="btn secondary" onClick={()=>setBusinessUnitEditor(null)}>Cancel</button><button className="btn primary" onClick={saveBusinessUnitRecord} disabled={businessUnitSaving}><Check size={16}/>{businessUnitSaving?'Saving…':'Save mapping'}</button></div>
     </div></div>}
 
     {toast && <div className="toast"><CheckCircle2 size={17}/>{toast}<button onClick={()=>setToast('')}><X size={15}/></button></div>}
