@@ -44,7 +44,8 @@ const importSources = {
       'ACTION_TYPE', 'PROCESS_TYPE'
     ],
     legacyColumns: ['LEGAL_ENTITY'],
-    required: ['LEDGER_NAME', 'PROCESS_NAME']
+    required: ['LEDGER_NAME', 'PROCESS_NAME'],
+    derivedNumericColumns: ['LEDGER_ID']
   },
   mapping: {
     table: 'XX_BU_LE_LEDGER_MAPPING',
@@ -63,8 +64,7 @@ const importSources = {
 };
 const progressBindDefs = {
   checklistId: { type: oracledb.STRING, maxSize: 100 },
-  businessUnitId: { type: oracledb.STRING, maxSize: 255 },
-  ledgerId: { type: oracledb.STRING, maxSize: 255 },
+  ledgerId: { type: oracledb.NUMBER },
   period: { type: oracledb.STRING, maxSize: 10 },
   status: { type: oracledb.STRING, maxSize: 30 },
   owner: { type: oracledb.STRING, maxSize: 150 },
@@ -128,15 +128,20 @@ async function readTasks(connection, ledgerId, period) {
             :period AS PERIOD
        FROM XX_OPERATIONAL_CHECKLIST checklist
        JOIN XX_BU_LE_LEDGER_MAPPING mapping
-         ON mapping.LEDGER_ID = :ledgerId
+         ON TO_CHAR(mapping.LEDGER_ID) = :ledgerId
         AND (
-          UPPER(TRIM(mapping.LEDGER_NAME)) = UPPER(TRIM(checklist.LEDGER_NAME))
-          OR UPPER(TRIM(TO_CHAR(mapping.LEDGER_ID))) = UPPER(TRIM(checklist.LEDGER_NAME))
+          checklist.LEDGER_ID = mapping.LEDGER_ID
+          OR (
+            checklist.LEDGER_ID IS NULL
+            AND (
+              UPPER(TRIM(checklist.LEDGER_NAME)) = UPPER(TRIM(mapping.LEDGER_NAME))
+              OR UPPER(TRIM(checklist.LEDGER_NAME)) = UPPER(TRIM(TO_CHAR(mapping.LEDGER_ID)))
+            )
+          )
         )
        LEFT JOIN XX_OPERATIONAL_CHECKLIST_PROGRESS progress
          ON progress.CHECKLIST_ROW_ID = TO_CHAR(checklist.CHECKLIST_ROW_ID)
-        AND progress.BUSINESS_UNIT_ID = mapping.BUSINESS_UNIT_ID
-        AND progress.LEDGER = mapping.LEDGER_ID
+        AND progress.LEDGER_ID = mapping.LEDGER_ID
         AND (
           progress.PERIOD = :period
           OR (
@@ -144,10 +149,9 @@ async function readTasks(connection, ledgerId, period) {
             AND NOT EXISTS (
               SELECT 1
                 FROM XX_OPERATIONAL_CHECKLIST_PROGRESS preferred
-               WHERE preferred.CHECKLIST_ROW_ID = progress.CHECKLIST_ROW_ID
-                 AND preferred.BUSINESS_UNIT_ID = progress.BUSINESS_UNIT_ID
-                 AND preferred.LEDGER = progress.LEDGER
-                 AND preferred.PERIOD = :period
+                WHERE preferred.CHECKLIST_ROW_ID = progress.CHECKLIST_ROW_ID
+                  AND preferred.LEDGER_ID = progress.LEDGER_ID
+                  AND preferred.PERIOD = :period
             )
           )
         )
@@ -158,7 +162,7 @@ async function readTasks(connection, ledgerId, period) {
   const periods = await connection.execute(
     `SELECT DISTINCT PERIOD
        FROM XX_OPERATIONAL_CHECKLIST_PROGRESS
-      WHERE LEDGER = :ledgerId
+      WHERE TO_CHAR(LEDGER_ID) = :ledgerId
       ORDER BY PERIOD DESC`,
     { ledgerId },
     { outFormat: oracledb.OUT_FORMAT_OBJECT }
@@ -523,21 +527,60 @@ async function main() {
           return values;
         });
 
-        const binds = Object.fromEntries(source.columns.map(column => {
-          const isNumeric = (source.numericColumns || []).includes(column);
-          return [column, {
-            type: isNumeric ? oracledb.NUMBER : oracledb.STRING,
-            ...(!isNumeric ? { maxSize: 4000 } : {})
-          }];
-        }));
-        const placeholders = source.columns.map(column =>
-          (source.dateColumns || []).includes(column)
-            ? `TO_DATE(:${column}, 'YYYY-MM-DD')`
-            : `:${column}`
-        ).join(', ');
-        const sql = `INSERT INTO ${source.table} (${source.columns.join(', ')}) VALUES (${placeholders})`;
+        const insertColumns = [...source.columns, ...(source.derivedNumericColumns || [])];
         const connection = await pool.getConnection();
         try {
+          if (source.derivedNumericColumns?.includes('LEDGER_ID')) {
+            const ledgerNames = [...new Set(rows.map(row => row.LEDGER_NAME.trim().toUpperCase()))];
+            const ledgerIdsByName = new Map(ledgerNames.map(name => [name, new Set()]));
+            for (let offset = 0; offset < ledgerNames.length; offset += 900) {
+              const names = ledgerNames.slice(offset, offset + 900);
+              const nameBinds = Object.fromEntries(names.map((name, index) => [`ledgerName${index}`, name]));
+              const namePlaceholders = names.map((_, index) => `:ledgerName${index}`).join(', ');
+              const mappings = await connection.execute(
+                `SELECT DISTINCT UPPER(TRIM(LEDGER_NAME)) AS LEDGER_NAME,
+                                 TO_CHAR(LEDGER_ID) AS LEDGER_ID
+                   FROM XX_BU_LE_LEDGER_MAPPING
+                  WHERE UPPER(TRIM(LEDGER_NAME)) IN (${namePlaceholders})
+                    AND LEDGER_ID IS NOT NULL`,
+                nameBinds,
+                { outFormat: oracledb.OUT_FORMAT_OBJECT }
+              );
+              for (const mapping of mappings.rows) {
+                ledgerIdsByName.get(mapping.LEDGER_NAME)?.add(mapping.LEDGER_ID);
+              }
+            }
+
+            for (const [index, row] of rows.entries()) {
+              const ledgerIds = ledgerIdsByName.get(row.LEDGER_NAME.trim().toUpperCase());
+              if (!ledgerIds?.size) {
+                throw new HttpError(400, `Row ${index + 1}: no ledger mapping found for "${row.LEDGER_NAME}". Upload the business-unit ledger mapping first.`);
+              }
+              if (ledgerIds.size > 1) {
+                throw new HttpError(400, `Row ${index + 1}: "${row.LEDGER_NAME}" maps to multiple ledger IDs. Resolve the mapping before uploading.`);
+              }
+              const [ledgerId] = ledgerIds;
+              if (!/^\d+$/.test(ledgerId) || !Number.isSafeInteger(Number(ledgerId))) {
+                throw new HttpError(400, `Row ${index + 1}: the mapped ledger ID is not a safe numeric value.`);
+              }
+              row.LEDGER_ID = Number(ledgerId);
+            }
+          }
+
+          const numericColumns = [...(source.numericColumns || []), ...(source.derivedNumericColumns || [])];
+          const binds = Object.fromEntries(insertColumns.map(column => {
+            const isNumeric = numericColumns.includes(column);
+            return [column, {
+              type: isNumeric ? oracledb.NUMBER : oracledb.STRING,
+              ...(!isNumeric ? { maxSize: 4000 } : {})
+            }];
+          }));
+          const placeholders = insertColumns.map(column =>
+            (source.dateColumns || []).includes(column)
+              ? `TO_DATE(:${column}, 'YYYY-MM-DD')`
+              : `:${column}`
+          ).join(', ');
+          const sql = `INSERT INTO ${source.table} (${insertColumns.join(', ')}) VALUES (${placeholders})`;
           const result = await connection.executeMany(sql, rows, {
             bindDefs: binds,
             autoCommit: false
@@ -581,7 +624,8 @@ async function main() {
           throw new HttpError(400, 'Task status is invalid.');
         }
         if (typeof patch.businessUnitId !== 'string' || !patch.businessUnitId.trim() || patch.businessUnitId.length > 255 ||
-            typeof patch.ledgerId !== 'string' || !patch.ledgerId.trim() || patch.ledgerId.length > 255) {
+            typeof patch.ledgerId !== 'string' || !/^\d+$/.test(patch.ledgerId.trim()) ||
+            !Number.isSafeInteger(Number(patch.ledgerId.trim()))) {
           throw new HttpError(400, 'Business unit and ledger identifiers are required.');
         }
         if (typeof patch.period !== 'string' ||
@@ -598,14 +642,20 @@ async function main() {
         try {
           const source = await connection.execute(
             `SELECT mapping.BUSINESS_UNIT_ID
-               FROM XX_OPERATIONAL_CHECKLIST checklist
-               JOIN XX_BU_LE_LEDGER_MAPPING mapping
-                 ON mapping.LEDGER_ID = :ledgerId
-                AND mapping.BUSINESS_UNIT_ID = :businessUnitId
-                AND (
-                  UPPER(TRIM(mapping.LEDGER_NAME)) = UPPER(TRIM(checklist.LEDGER_NAME))
-                  OR UPPER(TRIM(TO_CHAR(mapping.LEDGER_ID))) = UPPER(TRIM(checklist.LEDGER_NAME))
-                )
+                 FROM XX_OPERATIONAL_CHECKLIST checklist
+                 JOIN XX_BU_LE_LEDGER_MAPPING mapping
+                   ON TO_CHAR(mapping.LEDGER_ID) = :ledgerId
+                    AND mapping.BUSINESS_UNIT_ID = :businessUnitId
+                    AND (
+                      checklist.LEDGER_ID = mapping.LEDGER_ID
+                      OR (
+                        checklist.LEDGER_ID IS NULL
+                        AND (
+                          UPPER(TRIM(checklist.LEDGER_NAME)) = UPPER(TRIM(mapping.LEDGER_NAME))
+                          OR UPPER(TRIM(checklist.LEDGER_NAME)) = UPPER(TRIM(TO_CHAR(mapping.LEDGER_ID)))
+                        )
+                      )
+                    )
               WHERE TO_CHAR(checklist.CHECKLIST_ROW_ID) = :checklistId`,
             {
               checklistId,
@@ -615,10 +665,10 @@ async function main() {
             { outFormat: oracledb.OUT_FORMAT_OBJECT }
           );
           if (source.rows.length === 0) throw new HttpError(404, 'Checklist task not found.');
+          const businessUnitId = source.rows[0].BUSINESS_UNIT_ID;
           const progress = {
             checklistId,
-            businessUnitId: source.rows[0].BUSINESS_UNIT_ID,
-            ledgerId: patch.ledgerId.trim(),
+            ledgerId: Number(patch.ledgerId.trim()),
             period: patch.period,
             status: patch.status,
             owner: patch.owner.trim(),
@@ -628,14 +678,12 @@ async function main() {
             `MERGE INTO XX_OPERATIONAL_CHECKLIST_PROGRESS target
              USING (
                SELECT :checklistId AS CHECKLIST_ROW_ID,
-                      :businessUnitId AS BUSINESS_UNIT_ID,
-                      :ledgerId AS LEDGER,
+                      :ledgerId AS LEDGER_ID,
                       :period AS PERIOD
                  FROM DUAL
              ) source
                 ON (target.CHECKLIST_ROW_ID = source.CHECKLIST_ROW_ID
-                    AND target.BUSINESS_UNIT_ID = source.BUSINESS_UNIT_ID
-                    AND target.LEDGER = source.LEDGER
+                    AND target.LEDGER_ID = source.LEDGER_ID
                     AND target.PERIOD = source.PERIOD)
              WHEN MATCHED THEN UPDATE SET
                target.STATUS = :status,
@@ -644,13 +692,13 @@ async function main() {
                target.NOTE_OVERRIDDEN = 'Y',
                target.UPDATED_AT = SYSTIMESTAMP
              WHEN NOT MATCHED THEN INSERT
-               (CHECKLIST_ROW_ID, BUSINESS_UNIT_ID, LEDGER, STATUS, OWNER_NAME, PERIOD, NOTE, NOTE_OVERRIDDEN)
+               (CHECKLIST_ROW_ID, LEDGER_ID, STATUS, OWNER_NAME, PERIOD, NOTE, NOTE_OVERRIDDEN)
                VALUES
-               (:checklistId, :businessUnitId, :ledgerId, :status, :owner, :period, :note, 'Y')`,
+               (:checklistId, :ledgerId, :status, :owner, :period, :note, 'Y')`,
             progress,
             { bindDefs: progressBindDefs, autoCommit: true }
           );
-          const taskId = [checklistId, progress.businessUnitId, progress.ledgerId, progress.period].join('|');
+          const taskId = [checklistId, businessUnitId, String(progress.ledgerId), progress.period].join('|');
           sendJson(response, 200, {
             id: taskId,
             status: progress.status,
